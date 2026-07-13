@@ -21,6 +21,7 @@ the lock (see acquire_lock/release_lock).
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import html
 import json
@@ -31,10 +32,11 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
-import httpx
 import yaml
+from environs import Env
+from pydantic import BaseModel, Field
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
     Distance,
@@ -45,27 +47,61 @@ from qdrant_client.models import (
     VectorParams,
 )
 
-def _require_env(name: str) -> str:
-    value = os.environ.get(name)
-    if not value:
-        print(f"missing required environment variable: {name}", file=sys.stderr)
-        raise SystemExit(1)
-    return value
+from _common.config import load_yaml_config
+from _common.ollama import build_client, embed_query
 
+# env.str(name)/env.bool(name) raise a clear environs.EnvError if the
+# variable is unset -- no hand-rolled _require_env needed (was copy-pasted
+# between this file and services/mcp_server/src/server.py).
+env = Env()
 
 # No defaults here on purpose -- defaults live in docker-compose.yml
 # (via ${VAR:-default}); this script just requires the values to be set.
-CONTENT_DIR = Path(_require_env("CONTENT_DIR"))
-STATE_DIR = Path(_require_env("STATE_DIR"))
-QDRANT_URL = _require_env("QDRANT_URL")
-QDRANT_COLLECTION = _require_env("QDRANT_COLLECTION")
-OLLAMA_BASE_URL = _require_env("OLLAMA_BASE_URL")
-OLLAMA_EMBED_MODEL = _require_env("OLLAMA_EMBED_MODEL")
-FORCE_INGEST = _require_env("FORCE_INGEST")
+# Infra/credentials/run-mode only -- pipeline tuning knobs (paths, chunking,
+# batch size) live in config.yml instead, see below.
+QDRANT_URL = env.str("QDRANT_URL")
+QDRANT_COLLECTION = env.str("QDRANT_COLLECTION")
+OLLAMA_BASE_URL = env.str("OLLAMA_BASE_URL")
+MODEL_EMBED = env.str("MODEL_EMBED")
+FORCE_INGEST = env.bool("FORCE_INGEST")
 
-CHUNK_MAX_CHARS = int(_require_env("CHUNK_MAX_CHARS"))
-CHUNK_MIN_CHARS = int(_require_env("CHUNK_MIN_CHARS"))
-UPSERT_BATCH_SIZE = int(_require_env("UPSERT_BATCH_SIZE"))
+# Pipeline tuning knobs (content/state paths, chunking, upsert batch size)
+# live in config.yml, not the environment -- see that file for the full
+# field reference. `make ingest`/`make ingest-force` always rebuild the
+# image, so editing this file just needs a normal run, no separate rebuild
+# step. Reading/validating config.yml itself is _common.config's
+# load_yaml_config (shared with mcp-server and the reranker service).
+
+
+class _PathsConfig(BaseModel):
+    content_dir: str
+    state_dir: str
+
+
+class _ChunkingConfig(BaseModel):
+    max_chars: int = Field(gt=0)
+    min_chars: int = Field(gt=0)
+    overlap_chars: int = Field(ge=0)
+
+
+class IngestConfig(BaseModel):
+    paths: _PathsConfig
+    chunking: _ChunkingConfig
+    upsert_batch_size: int = Field(gt=0)
+    ollama_timeout: float = Field(gt=0)
+
+
+_config = load_yaml_config(Path("config.yml"), IngestConfig)
+
+CONTENT_DIR = Path(_config.paths.content_dir)
+STATE_DIR = Path(_config.paths.state_dir)
+CHUNK_MAX_CHARS = _config.chunking.max_chars
+CHUNK_MIN_CHARS = _config.chunking.min_chars
+# Clamp defensively -- a misconfigured overlap >= max_chars would make _pack's
+# "current" never shrink, growing every chunk to max_chars and looping.
+CHUNK_OVERLAP_CHARS = min(_config.chunking.overlap_chars, CHUNK_MAX_CHARS - 1)
+UPSERT_BATCH_SIZE = _config.upsert_batch_size
+OLLAMA_TIMEOUT = _config.ollama_timeout
 
 MANIFEST_PATH = STATE_DIR / "manifest.json"
 
@@ -256,14 +292,18 @@ def split_sections(clean_text: str) -> list[Section]:
     return sections
 
 
-def _pack(pieces: list[str], sep: str, max_chars: int) -> list[str]:
+def _pack(pieces: list[str], sep: str, max_chars: int, overlap: int = 0) -> list[str]:
     chunks: list[str] = []
     current = ""
     for piece in pieces:
         candidate = f"{current}{sep}{piece}" if current else piece
         if len(candidate) > max_chars and current:
             chunks.append(current.strip())
-            current = piece
+            # Carry the flushed chunk's tail into the next one so a piece
+            # split across the boundary still has surrounding context on
+            # both sides (see CHUNK_OVERLAP_CHARS in ingest.py).
+            tail = current[-overlap:] if overlap else ""
+            current = f"{tail}{sep}{piece}" if tail else piece
         else:
             current = candidate
     if current.strip():
@@ -271,26 +311,27 @@ def _pack(pieces: list[str], sep: str, max_chars: int) -> list[str]:
     return chunks
 
 
-def _hard_wrap(text: str, max_chars: int) -> list[str]:
-    return [text[i : i + max_chars] for i in range(0, len(text), max_chars)]
+def _hard_wrap(text: str, max_chars: int, overlap: int = 0) -> list[str]:
+    step = max_chars - overlap if overlap else max_chars
+    return [text[i : i + max_chars] for i in range(0, len(text), step)]
 
 
-def _split_long_text(text: str, max_chars: int) -> list[str]:
+def _split_long_text(text: str, max_chars: int, overlap: int = 0) -> list[str]:
     if len(text) <= max_chars:
         return [text]
 
     result: list[str] = []
-    for paragraph in _pack(re.split(r"\n{2,}", text), "\n\n", max_chars):
+    for paragraph in _pack(re.split(r"\n{2,}", text), "\n\n", max_chars, overlap):
         if len(paragraph) <= max_chars:
             result.append(paragraph)
             continue
         # Single oversized paragraph (e.g. a huge converted table): fall
         # back to line-level packing, then hard-wrap any still-long line.
-        for line_chunk in _pack(paragraph.split("\n"), "\n", max_chars):
+        for line_chunk in _pack(paragraph.split("\n"), "\n", max_chars, overlap):
             if len(line_chunk) <= max_chars:
                 result.append(line_chunk)
             else:
-                result.extend(_hard_wrap(line_chunk, max_chars))
+                result.extend(_hard_wrap(line_chunk, max_chars, overlap))
     return result
 
 
@@ -310,7 +351,7 @@ def build_chunks(page: Page, clean_text: str, section_title: str | None = None) 
     for section in sections:
         if len(section.text) < CHUNK_MIN_CHARS:
             continue
-        for piece in _split_long_text(section.text, CHUNK_MAX_CHARS):
+        for piece in _split_long_text(section.text, CHUNK_MAX_CHARS, CHUNK_OVERLAP_CHARS):
             if len(piece) < CHUNK_MIN_CHARS:
                 continue
             raw_chunks.append((section.heading, piece))
@@ -338,22 +379,6 @@ def build_chunks(page: Page, clean_text: str, section_title: str | None = None) 
 # --------------------------------------------------------------------------
 
 
-class Embedder:
-    def __init__(self, base_url: str, model: str):
-        self.client = httpx.Client(base_url=base_url, timeout=120.0)
-        self.model = model
-
-    def embed(self, text: str) -> list[float]:
-        resp = self.client.post(
-            "/api/embeddings", json={"model": self.model, "prompt": text}
-        )
-        resp.raise_for_status()
-        return resp.json()["embedding"]
-
-    def close(self) -> None:
-        self.client.close()
-
-
 def point_id(rel_path: str, chunk_index: int) -> str:
     return str(uuid.uuid5(POINT_NAMESPACE, f"{rel_path}::{chunk_index}"))
 
@@ -365,7 +390,10 @@ def iter_content_files(root: Path):
 
 
 def build_points(
-    page: Page, clean_text: str, embedder: Embedder, section_title: str | None = None
+    page: Page,
+    clean_text: str,
+    embed_fn: Callable[[str], list[float]],
+    section_title: str | None = None,
 ) -> list[PointStruct]:
     chunks = build_chunks(page, clean_text, section_title)
     if not chunks:
@@ -378,7 +406,7 @@ def build_points(
 
     points: list[PointStruct] = []
     for chunk in chunks:
-        vector = embedder.embed(chunk.text)
+        vector = embed_fn(chunk.text)
         payload = {
             "text": chunk.text,
             "source_path": page.rel_path,
@@ -470,7 +498,7 @@ def _run() -> int:
         print(f"content dir not found: {CONTENT_DIR}", file=sys.stderr)
         return 1
 
-    force = FORCE_INGEST.strip().lower() == "true"
+    force = FORCE_INGEST
     qdrant = QdrantClient(url=QDRANT_URL)
 
     if not force and not qdrant.collection_exists(QDRANT_COLLECTION):
@@ -521,7 +549,8 @@ def _run() -> int:
         delete_points_for_path(qdrant, rel_path)
         manifest.pop(rel_path, None)
 
-    embedder = Embedder(OLLAMA_BASE_URL, OLLAMA_EMBED_MODEL)
+    ollama_client = build_client(OLLAMA_BASE_URL, OLLAMA_TIMEOUT)
+    embed_fn = functools.partial(embed_query, ollama_client, MODEL_EMBED)
     total_points: list[PointStruct] = []
     files_with_content = 0
     files_skipped_empty = 0
@@ -539,7 +568,7 @@ def _run() -> int:
             clean_text = clean_body(page.body, params)
             parts = Path(rel_path).parts
             section_title = section_titles.get(parts[0]) if len(parts) > 1 else None
-            points = build_points(page, clean_text, embedder, section_title)
+            points = build_points(page, clean_text, embed_fn, section_title)
 
         manifest[rel_path] = {"hash": current_hashes[rel_path], "chunk_count": len(points)}
 
@@ -553,7 +582,7 @@ def _run() -> int:
         total_points.extend(points)
         print(f"  embedded  {len(points):3d} chunks  {rel_path}")
 
-    embedder.close()
+    ollama_client.close()
 
     if total_points:
         if force:

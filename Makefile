@@ -5,8 +5,9 @@ QDRANT_HTTP_PORT ?= 6333
 OLLAMA_PORT ?= 11434
 OPEN_WEBUI_PORT ?= 3000
 MCP_SERVER_PORT ?= 8000
+RERANKER_PORT_HOST ?= 50051
 
-.PHONY: up down restart status ps logs pull-models ingest ingest-force mcp-logs clean
+.PHONY: up down restart status ps logs pull-models ingest ingest-force mcp-logs reranker-logs clean
 
 up:
 	docker compose up -d
@@ -32,12 +33,18 @@ status ps:
 	@bash -c '</dev/tcp/localhost/$(MCP_SERVER_PORT)' 2>/dev/null \
 		&& echo "  mcp-server:  OK  (http://localhost:$(MCP_SERVER_PORT)/mcp)" \
 		|| echo "  mcp-server:  NOT RESPONDING"
+	@bash -c '</dev/tcp/localhost/$(RERANKER_PORT_HOST)' 2>/dev/null \
+		&& echo "  reranker:    OK  (http://localhost:$(RERANKER_PORT_HOST))" \
+		|| echo "  reranker:    NOT RESPONDING"
 
 logs:
 	docker compose logs -f
 
 mcp-logs:
 	docker compose logs -f mcp-server
+
+reranker-logs:
+	docker compose logs -f reranker
 
 pull-models:
 	docker compose run --rm ollama-pull

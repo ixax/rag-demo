@@ -1,0 +1,96 @@
+# mcp-server runtime configuration -- RAG-pipeline tuning knobs.
+#
+# Deployment/infra settings (Qdrant/Ollama URLs, ports, embedding model,
+# Anthropic credentials) stay as environment variables in docker-compose.yml
+# / .env -- this file is only for things you'd want to tune without touching
+# infra. Since ./services/mcp_server is bind-mounted into the container,
+# editing this file and restarting the service (`make restart`, or just the
+# mcp-server service) is enough -- no rebuild needed.
+
+# Reranking between Qdrant retrieval and generation, via the standalone
+# reranker gRPC service (see /services/reranker) -- its model/max_length
+# live in services/reranker/config.yml, not here.
+reranker:
+  # true | false. When false, retrieval falls back to plain Qdrant
+  # cosine-similarity order: the reranker service is never called, no
+  # "rerank" step runs, and each result's rerank_score is null. Faster
+  # (skips a network round-trip + CPU-heavy cross-encoder inference) but
+  # less precise -- vector similarity alone can rank a semantically-
+  # adjacent-but-wrong chunk above the actual answer (see AGENTS.md's
+  # search-quality notes). Good for quick local iteration, or when the
+  # reranker service isn't running.
+  enabled: true
+
+# How many chunks to pull and keep at each retrieval stage.
+retrieval:
+  # Integer > 0. Candidates pulled from Qdrant by cosine similarity, before
+  # reranking. Larger = better recall for the reranker to work with, but
+  # slower (reranker inference time scales linearly with this). Irrelevant
+  # when reranker.enabled is false -- top_k_rerank is applied directly to
+  # the Qdrant-ordered hits instead, so there's no separate candidate pool.
+  top_k_retrieve: 10
+  # Integer > 0. How many reranked (or, with the reranker off, raw
+  # vector-retrieved) chunks are kept as final context for generation, or
+  # returned by search_documents. This is the default; callers can still
+  # override it per-call via the tool's `top_k` argument.
+  top_k_rerank: 10
+
+# Generation backend for answer_question. search_documents never generates
+# (retrieval-only), so this doesn't affect it.
+backend:
+  # "" | "ollama" | "anthropic".
+  #   "" (empty):  skip generation entirely. answer_question then behaves
+  #                like search_documents -- returns context/trace only,
+  #                with answer/reasoning/sources left null/empty and no
+  #                "generate" step in trace. Use this to test retrieval
+  #                without paying generation latency/cost.
+  #   ollama:      local MODEL_INSTRUCT_INTERNAL (env var) via Ollama's
+  #                /api/chat. max_tokens below is ignored.
+  #   anthropic:   the Claude API via the official SDK -- uses
+  #                MODEL_INSTRUCT_EXTERNAL (env var) and max_tokens below,
+  #                and requires ANTHROPIC_API_KEY to be set in the
+  #                environment (neither credential lives in this file).
+  type: "ollama"
+  # Placeholder -- overwritten at startup from MODEL_INSTRUCT_INTERNAL or
+  # MODEL_INSTRUCT_EXTERNAL, whichever type above selects (see server.py).
+  # Whatever is written here is ignored.
+  model: "$MODEL_INSTRUCT_INTERNAL or $MODEL_INSTRUCT_EXTERNAL"
+  # Max output tokens for the Claude API call. Required (no default) when
+  # type: "anthropic"; ignored otherwise. Integer > 0.
+  max_tokens: 1024
+
+# System prompt sent to the generation backend (shared by both ollama and
+# anthropic). Must keep the model replying in three labeled sections, in
+# this order, each starting on its own line -- "Reasoning:", "Answer:",
+# "Sources:" -- because answer_question's _parse_structured_answer() parses
+# exactly that shape. If the model doesn't follow it (small local models
+# sometimes don't), the parser falls back to reasoning=null, answer=<raw
+# text>, sources=[] rather than erroring.
+system_prompt: |
+  You are a documentation assistant. Answer the user's question using ONLY
+  the numbered context excerpts below -- never use outside knowledge and
+  never guess. Always reply in the same language the question was asked in
+  (the content may be in a different language than the question --
+  translate as needed).
+
+  Structure your response as exactly three labeled sections, in this
+  order, each starting on its own line with the label below:
+
+  Reasoning: 1-3 sentences judging whether the excerpts actually address
+  the question -- which ones are relevant and why, or why none of them
+  are. If you're not sure the answer is correct, say so here.
+
+  Answer: the answer itself, as plain prose/steps, with NO bracketed
+  markers like [1] or [n] anywhere in it -- do not cite inline. If the
+  excerpts don't support a reliable answer, write here (in the question's
+  language) that the knowledge base doesn't contain one, and briefly say
+  what the excerpts do cover instead, if anything. A clear 'I don't know'
+  is always better than a plausible-sounding guess.
+
+  Sources: one source per line, formatted as '[n] title (path)', covering
+  only the excerpts you actually used in Answer. Omit this section
+  entirely when Answer says you don't know.
+
+# Request timeout (seconds) for calls to Ollama's /api/embeddings (query
+# embedding). Number > 0.
+ollama_timeout: 120

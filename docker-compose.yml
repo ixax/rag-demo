@@ -1,11 +1,68 @@
+# Scalars, grouped by meaning -- x-* keys are Compose "extension fields",
+# ignored by the engine, used here purely as a place to define each value
+# once (via a YAML anchor `&name`) and reuse it below (via alias `*name`).
+
+# Host-exposed ports. Defaults kept -- these are dev-convenience values, fine
+# to run with unset.
+x-qdrant-http-port: &qdrant-http-port "${QDRANT_HTTP_PORT:-6333}:6333"
+x-qdrant-grpc-port: &qdrant-grpc-port "${QDRANT_GRPC_PORT:-6334}:6334"
+x-ollama-port: &ollama-port "${OLLAMA_PORT:-11434}:11434"
+x-open-webui-port: &open-webui-port "${OPEN_WEBUI_PORT:-3000}:8080"
+x-mcp-server-published-port: &mcp-server-published-port "${MCP_SERVER_PORT:-8000}"
+x-reranker-published-port: &reranker-published-port "${RERANKER_PORT_HOST:-50051}"
+
+# mcp-server's own bind address/port *inside* its container -- this is not
+# the host-exposed port above (that's how it's reached from outside Docker;
+# these two happen to both default to 8000, but changing one doesn't imply
+# the other). Anchored so `command`, `ports.target`, and the MCP_HOST/
+# MCP_PORT env vars server.py reads can't drift apart into three different
+# hardcoded "8000"/"0.0.0.0" literals.
+x-mcp-host: &mcp-host "0.0.0.0"
+x-mcp-internal-port: &mcp-internal-port "8000"
+
+# Same idea for the reranker HTTP service's own bind address/port.
+x-reranker-host: &reranker-host "0.0.0.0"
+x-reranker-internal-port: &reranker-internal-port "50051"
+
+# Cross-encoder model id for the reranker service (services/reranker/config.yml
+# only has max_length -- the model itself is an env var so it can be swapped
+# without editing that file).
+x-model-reranker: &model-reranker ${MODEL_RERANKER:?set MODEL_RERANKER, e.g. in a .env file next to docker-compose.yml}
+
+# Run-mode toggle. Default kept -- false (incremental) is the safe default;
+# `make ingest-force` overrides it to true for a single run.
+x-force-ingest: &force-ingest ${FORCE_INGEST:-false}
+
+# Internal (container-network) service URLs. Composed once here instead of
+# being repeated as literals in every service that talks to qdrant/ollama/
+# the reranker -- the ports are each service's fixed internal listen port,
+# unrelated to the host-exposed ports above (those just control what's
+# reachable from outside Docker).
+x-qdrant-url: &qdrant-url "http://qdrant:6333"
+x-ollama-base-url: &ollama-base-url "http://ollama:11434"
+x-reranker-url: &reranker-url "http://reranker:50051"
+
+# Required, no default -- fails fast with a clear message if unset, instead
+# of silently ingesting into/serving from the wrong collection or model.
+x-qdrant-collection: &qdrant-collection ${QDRANT_COLLECTION:?set QDRANT_COLLECTION, e.g. in a .env file next to docker-compose.yml}
+x-model-embed: &model-embed ${MODEL_EMBED:?set MODEL_EMBED, e.g. in a .env file next to docker-compose.yml}
+x-model-instruct-internal: &model-instruct-internal ${MODEL_INSTRUCT_INTERNAL:?set MODEL_INSTRUCT_INTERNAL, e.g. in a .env file next to docker-compose.yml}
+
+# Generation model for mcp-server's "anthropic" backend.type -- unlike
+# MODEL_INSTRUCT_INTERNAL above, optional (empty default): only required
+# when backend.type is actually "anthropic" (see
+# services/mcp_server/src/server.py, which fails fast itself if it's unset
+# in that case).
+x-model-instruct-external: &model-instruct-external "${MODEL_INSTRUCT_EXTERNAL:-}"
+
 services:
   qdrant:
     image: qdrant/qdrant:latest
     container_name: rag-qdrant
     restart: unless-stopped
     ports:
-      - "${QDRANT_HTTP_PORT:-6333}:6333"
-      - "${QDRANT_GRPC_PORT:-6334}:6334"
+      - *qdrant-http-port
+      - *qdrant-grpc-port
     volumes:
       - qdrant_data:/qdrant/storage
     healthcheck:
@@ -20,7 +77,7 @@ services:
     container_name: rag-ollama
     restart: unless-stopped
     ports:
-      - "${OLLAMA_PORT:-11434}:11434"
+      - *ollama-port
     volumes:
       - ollama_data:/root/.ollama
     healthcheck:
@@ -38,11 +95,11 @@ services:
         condition: service_healthy
     environment:
       OLLAMA_HOST: "ollama:11434"
-      OLLAMA_INSTRUCT_MODEL: "${OLLAMA_INSTRUCT_MODEL:-llama3.2:3b}"
-      OLLAMA_EMBED_MODEL: "${OLLAMA_EMBED_MODEL:-bge-m3}"
+      MODEL_INSTRUCT_INTERNAL: *model-instruct-internal
+      MODEL_EMBED: *model-embed
     entrypoint: ["sh", "-c"]
     command:
-      - "ollama pull \"$$OLLAMA_INSTRUCT_MODEL\" && ollama pull \"$$OLLAMA_EMBED_MODEL\""
+      - "ollama pull \"$$MODEL_INSTRUCT_INTERNAL\" && ollama pull \"$$MODEL_EMBED\""
     restart: "no"
 
   open-webui:
@@ -50,9 +107,9 @@ services:
     container_name: rag-open-webui
     restart: unless-stopped
     ports:
-      - "${OPEN_WEBUI_PORT:-3000}:8080"
+      - *open-webui-port
     environment:
-      OLLAMA_BASE_URL: "http://ollama:11434"
+      OLLAMA_BASE_URL: *ollama-base-url
     volumes:
       - openwebui_data:/app/backend/data
     depends_on:
@@ -61,20 +118,21 @@ services:
 
   ingest:
     build:
-      context: ./ingest
+      # Root context (not ./services/ingest) because the Dockerfile also
+      # needs /services/_common, shared with mcp-server and the reranker
+      # service (config loading, Ollama embedding client).
+      context: .
+      dockerfile: services/ingest/Dockerfile
     container_name: rag-ingest
     profiles: ["ingest"]
     environment:
-      CONTENT_DIR: "/content"
-      STATE_DIR: "/state"
-      QDRANT_URL: "http://qdrant:6333"
-      QDRANT_COLLECTION: "${QDRANT_COLLECTION:-content}"
-      OLLAMA_BASE_URL: "http://ollama:11434"
-      OLLAMA_EMBED_MODEL: "${OLLAMA_EMBED_MODEL:-bge-m3}"
-      FORCE_INGEST: "${FORCE_INGEST:-false}"
-      CHUNK_MAX_CHARS: "${CHUNK_MAX_CHARS:-1800}"
-      CHUNK_MIN_CHARS: "${CHUNK_MIN_CHARS:-30}"
-      UPSERT_BATCH_SIZE: "${UPSERT_BATCH_SIZE:-64}"
+      QDRANT_URL: *qdrant-url
+      QDRANT_COLLECTION: *qdrant-collection
+      OLLAMA_BASE_URL: *ollama-base-url
+      MODEL_EMBED: *model-embed
+      FORCE_INGEST: *force-ingest
+      # Content/state paths, chunking, and upsert batch size live in
+      # ingest/config.yml now, not here -- see that file.
     volumes:
       - ./content:/content:ro
       - ingest_state:/state
@@ -85,38 +143,99 @@ services:
         condition: service_healthy
     restart: "no"
 
+  # Cross-encoder reranking as a standalone FastAPI/HTTP service (see
+  # /services/reranker) -- keeps sentence-transformers/torch out of
+  # mcp-server's image, and lets the reranker be swapped/restarted/scaled
+  # independently. Model is MODEL_RERANKER below; max_length lives in
+  # services/reranker/config.yml.
+  reranker:
+    build:
+      # Root context (not ./services/reranker) because the Dockerfile also
+      # needs /services/_common, shared with ingest and mcp-server (config
+      # loading).
+      context: .
+      dockerfile: services/reranker/Dockerfile
+    container_name: rag-reranker
+    restart: unless-stopped
+    # Matches the Dockerfile CMD -- kept explicit here so it's an obvious,
+    # easy override point (e.g. append `--reload` for dev without editing
+    # the image). Host/port come from the same anchors as `ports.target`
+    # below -- server.py itself doesn't read them (see its module
+    # docstring).
+    command: ["uvicorn", "src.server:app", "--host", *reranker-host, "--port", *reranker-internal-port]
+    ports:
+      - target: *reranker-internal-port
+        published: *reranker-published-port
+        protocol: tcp
+    environment:
+      MODEL_RERANKER: *model-reranker
+    volumes:
+      - ./services/reranker/src:/app/src
+      - ./services/reranker/config.yml:/app/config.yml
+      - ./services/_common:/app/_common
+      - reranker_cache:/root/.cache/huggingface
+    healthcheck:
+      # Raw TCP check, not curl -- curl isn't installed in this image (same
+      # approach as qdrant's healthcheck above).
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/localhost/50051'"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
   mcp-server:
     build:
-      context: ./mcp_server
+      # Root context (not ./services/mcp_server) because the Dockerfile also
+      # needs /services/_common, shared with ingest and the reranker
+      # service (config loading, Ollama embedding client).
+      context: .
+      dockerfile: services/mcp_server/Dockerfile
     container_name: rag-mcp-server
     restart: unless-stopped
     # Matches the Dockerfile CMD -- kept explicit here so it's an obvious,
     # easy override point (e.g. append `--reload` for dev without editing
     # the image), via `docker compose run --rm --service-ports mcp-server
-    # uvicorn server:app --host 0.0.0.0 --port 8000 --reload` or a
-    # docker-compose.override.yml.
-    command: ["uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8000"]
+    # uvicorn src.server:app --host 0.0.0.0 --port 8000 --reload` or a
+    # docker-compose.override.yml. Host/port come from the same anchors as
+    # `ports.target` and MCP_HOST/MCP_PORT below.
+    command: ["uvicorn", "src.server:app", "--host", *mcp-host, "--port", *mcp-internal-port]
     ports:
-      - "${MCP_SERVER_PORT:-8000}:8000"
+      - target: *mcp-internal-port
+        published: *mcp-server-published-port
+        protocol: tcp
     environment:
-      QDRANT_URL: "http://qdrant:6333"
-      QDRANT_COLLECTION: "${QDRANT_COLLECTION:-content}"
-      OLLAMA_BASE_URL: "http://ollama:11434"
-      OLLAMA_EMBED_MODEL: "${OLLAMA_EMBED_MODEL:-bge-m3}"
-      OLLAMA_INSTRUCT_MODEL: "${OLLAMA_INSTRUCT_MODEL:-llama3.2:3b}"
-      RERANKER_MODEL: "${RERANKER_MODEL:-BAAI/bge-reranker-v2-m3}"
-      TOP_K_RETRIEVE: "${TOP_K_RETRIEVE:-20}"
-      TOP_K_RERANK: "${TOP_K_RERANK:-5}"
-      MCP_HOST: "0.0.0.0"
-      MCP_PORT: "8000"
+      QDRANT_URL: *qdrant-url
+      QDRANT_COLLECTION: *qdrant-collection
+      OLLAMA_BASE_URL: *ollama-base-url
+      MODEL_EMBED: *model-embed
+      MODEL_INSTRUCT_INTERNAL: *model-instruct-internal
+      MODEL_INSTRUCT_EXTERNAL: *model-instruct-external
+      MCP_HOST: *mcp-host
+      MCP_PORT: *mcp-internal-port
+      RERANKER_URL: *reranker-url
+      # Reranker on/off, TOP_K_RETRIEVE/RERANK, backend.type/max_tokens, and
+      # the system prompt live in mcp_server/config.yml now, not here -- see
+      # that file. ANTHROPIC_API_KEY/MODEL_INSTRUCT_EXTERNAL stay as env:
+      # the former is a credential, the latter is only read when config.yml's
+      # backend.type is "anthropic" (same override-before-validate pattern
+      # as the reranker's MODEL_RERANKER, see services/mcp_server/src/server.py).
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
     volumes:
-      - ./mcp_server:/app
-      - reranker_cache:/root/.cache/huggingface
+      - ./services/mcp_server/src:/app/src
+      - ./services/mcp_server/config.yml:/app/config.yml
+      - ./services/_common:/app/_common
     depends_on:
       qdrant:
         condition: service_healthy
       ollama:
         condition: service_healthy
+      # service_started, not service_healthy -- the reranker's healthcheck
+      # only passes once its model finishes loading (can be slow on a cold
+      # cache), and mcp-server shouldn't block startup on that. It's also
+      # only actually needed when config.yml's reranker.enabled is true,
+      # which compose has no way to know about.
+      reranker:
+        condition: service_started
 
 volumes:
   qdrant_data:

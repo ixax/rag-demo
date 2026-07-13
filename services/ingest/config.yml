@@ -1,0 +1,48 @@
+# ingest runtime configuration -- pipeline tuning knobs.
+#
+# Deployment/infra settings (Qdrant URL/collection, embedding backend URL,
+# FORCE_INGEST run-mode toggle) stay as environment variables in
+# docker-compose.yml / .env -- FORCE_INGEST in particular is flipped
+# per-invocation by `make ingest-force`, so it isn't a good fit for a static
+# file. `make ingest`/`make ingest-force` always rebuild the ingest image
+# (`--build` in the Makefile), so editing this file just needs a normal
+# `make ingest` run -- no separate rebuild step to remember.
+
+# Paths inside the ingest container (see docker-compose.yml's volume mounts
+# for what's bind-mounted where on the host).
+paths:
+  # Directory walked for Hugo markdown content (mounted read-only from
+  # ./content on the host).
+  content_dir: "/content"
+  # Directory for the incremental-ingest manifest (manifest.json) and the
+  # cross-run lock file (ingest.lock). Persisted in the ingest_state volume
+  # so incremental mode works across separate `make ingest` invocations.
+  state_dir: "/state"
+
+# How pages are split into chunks before embedding.
+chunking:
+  # Integer > 0, in characters (not tokens). Sections longer than this are
+  # split further (paragraph-, then line-, then hard-wrapped) so no single
+  # chunk overwhelms the embedding model's context or dilutes retrieval
+  # relevance. See build_chunks()/_split_long_text() in ingest.py.
+  max_chars: 1800
+  # Integer > 0, in characters. Sections/pieces shorter than this are
+  # dropped rather than embedded as their own chunk -- too little text to
+  # carry standalone retrieval signal (e.g. a lone heading with no body).
+  min_chars: 30
+  # Integer >= 0, in characters. Only kicks in when a single section is
+  # long enough to be split into multiple pieces by max_chars above (most
+  # sections aren't -- they stay one chunk with no overlap needed). When a
+  # split does happen, this many trailing characters of the previous piece
+  # are repeated at the start of the next one, so a sentence/idea cut across
+  # the boundary still has surrounding context on both sides.
+  overlap_chars: 120
+
+# How many points are sent to Qdrant per upsert call during ingest.
+# Integer > 0. Larger batches mean fewer round trips but a bigger single
+# request; smaller batches show progress more often (see the "upserted
+# N/total" log line) and reduce memory spikes for very large collections.
+upsert_batch_size: 64
+
+# Request timeout (seconds) for calls to Ollama's /api/embeddings. Number > 0.
+ollama_timeout: 120
