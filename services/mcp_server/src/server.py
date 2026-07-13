@@ -48,6 +48,7 @@ from environs import Env
 from mcp.server.fastmcp import FastMCP
 from qdrant_client import QdrantClient
 
+from _common.logging_config import configure_logging, get_logger
 from _common.ollama import build_client, embed_query
 
 from .libs import anthropic as anthropic_lib
@@ -74,6 +75,9 @@ MCP_PORT = env.int("MCP_PORT")
 # enforces that once the right one is picked and injected below.
 MODEL_INSTRUCT_INTERNAL = env.str("MODEL_INSTRUCT_INTERNAL")
 MODEL_INSTRUCT_EXTERNAL = env.str("MODEL_INSTRUCT_EXTERNAL", default=None)
+
+configure_logging()
+logger = get_logger(__name__)
 
 # RAG-pipeline tuning knobs (reranker on/off, retrieval top-k, generation
 # backend.type/max_tokens, system prompt) live in config.yml, not the
@@ -246,6 +250,14 @@ def answer_question(
     with timer("generate"):
         match config.backend.type:
             case "anthropic":
+                # Guaranteed non-None by this point: ANTHROPIC_API_KEY is
+                # required (so anthropic_client is built) whenever
+                # backend.type is "anthropic", and BackendConfig's
+                # model_validator requires model/max_tokens in that case too
+                # -- mypy can't see either invariant from here.
+                assert anthropic_client is not None
+                assert config.backend.model is not None
+                assert config.backend.max_tokens is not None
                 raw = anthropic_lib.generate(
                     anthropic_client,
                     config.backend.model,
@@ -254,6 +266,10 @@ def answer_question(
                     user_content,
                 )
             case "ollama":
+                # MODEL_INSTRUCT_INTERNAL is a required env var (server.py
+                # module scope), always injected into backend.model
+                # regardless of type -- guaranteed non-None here too.
+                assert config.backend.model is not None
                 raw = ollama_lib.generate(ollama_client, config.backend.model, config.system_prompt, user_content, config.generate_timeout)
             case _:
                 # Unreachable: config.backend.type is a pydantic Literal

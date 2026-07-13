@@ -50,6 +50,7 @@ from qdrant_client.models import (
 )
 
 from _common.config import load_yaml_config
+from _common.logging_config import configure_logging, get_logger
 from _common.ollama import build_client, embed_query
 
 # env.str(name)/env.bool(name) raise a clear environs.EnvError if the
@@ -66,6 +67,9 @@ QDRANT_COLLECTION = env.str("QDRANT_COLLECTION")
 OLLAMA_BASE_URL = env.str("OLLAMA_BASE_URL")
 MODEL_EMBED = env.str("MODEL_EMBED")
 FORCE_INGEST = env.bool("FORCE_INGEST")
+
+configure_logging()
+logger = get_logger(__name__)
 
 # Pipeline tuning knobs (content/state paths, chunking, upsert batch size)
 # live in config.yml, not the environment -- see that file for the full
@@ -472,11 +476,11 @@ def acquire_lock() -> None:
         fd = os.open(LOCK_PATH, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
     except FileExistsError:
         held_since = LOCK_PATH.read_text().strip() if LOCK_PATH.is_file() else "unknown"
-        print(
-            f"another ingest run is already in progress ({held_since}) -- "
-            f"refusing to start a second one. If that run crashed without "
-            f"cleaning up, remove {LOCK_PATH} manually and retry.",
-            file=sys.stderr,
+        logger.error(
+            "another ingest run is already in progress (%s) -- refusing to start a second one. "
+            "If that run crashed without cleaning up, remove %s manually and retry.",
+            held_since,
+            LOCK_PATH,
         )
         raise SystemExit(1)
     with os.fdopen(fd, "w") as f:
@@ -497,7 +501,7 @@ def main() -> int:
 
 def _run() -> int:
     if not CONTENT_DIR.is_dir():
-        print(f"content dir not found: {CONTENT_DIR}", file=sys.stderr)
+        logger.error("content dir not found: %s", CONTENT_DIR)
         return 1
 
     force = FORCE_INGEST
@@ -510,17 +514,21 @@ def _run() -> int:
     # whenever the target collection is missing or has no points, regardless
     # of what the manifest says.
     if not force and not qdrant.collection_exists(QDRANT_COLLECTION):
-        print(f"collection '{QDRANT_COLLECTION}' does not exist yet -- forcing a full rebuild")
+        logger.info("collection '%s' does not exist yet -- forcing a full rebuild", QDRANT_COLLECTION)
         force = True
     elif not force and qdrant.count(QDRANT_COLLECTION, exact=True).count == 0:
-        print(f"collection '{QDRANT_COLLECTION}' exists but is empty -- forcing a full rebuild")
+        logger.info("collection '%s' exists but is empty -- forcing a full rebuild", QDRANT_COLLECTION)
         force = True
 
     old_manifest = {} if force else load_manifest(MANIFEST_PATH)
-    print("FORCE_INGEST=true -- full rebuild" if force else f"incremental run against {len(old_manifest)} previously indexed files")
+    logger.info(
+        "FORCE_INGEST=true -- full rebuild"
+        if force
+        else f"incremental run against {len(old_manifest)} previously indexed files"
+    )
 
     files = list(iter_content_files(CONTENT_DIR))
-    print(f"found {len(files)} markdown files under {CONTENT_DIR}")
+    logger.info("found %d markdown files under %s", len(files), CONTENT_DIR)
     files_by_rel = {str(p.relative_to(CONTENT_DIR)): p for p in files}
     current_hashes = {rel: file_hash(p) for rel, p in files_by_rel.items()}
 
@@ -549,14 +557,14 @@ def _run() -> int:
         removed_paths = set(old_manifest) - set(current_hashes)
 
     if not force and not changed_paths and not removed_paths:
-        print("nothing changed since last run -- done")
+        logger.info("nothing changed since last run -- done")
         return 0
 
-    print(f"{len(changed_paths)} new/changed file(s), {len(removed_paths)} removed file(s)")
+    logger.info("%d new/changed file(s), %d removed file(s)", len(changed_paths), len(removed_paths))
 
     manifest: dict[str, Any] = {} if force else dict(old_manifest)
     for rel_path in sorted(removed_paths):
-        print(f"  removing  {rel_path}")
+        logger.info("  removing  %s", rel_path)
         delete_points_for_path(qdrant, rel_path)
         manifest.pop(rel_path, None)
 
@@ -598,7 +606,7 @@ def _run() -> int:
 
         if not points:
             files_skipped_empty += 1
-            print(f"  {progress} skipped   (empty)  {rel_path}")
+            logger.info("  %s skipped   (empty)  %s", progress, rel_path)
             save_manifest(MANIFEST_PATH, manifest)
             continue
 
@@ -607,7 +615,7 @@ def _run() -> int:
 
         if not collection_ready:
             vector_size = len(points[0].vector)
-            print(f"recreating collection '{QDRANT_COLLECTION}' (size={vector_size})")
+            logger.info("recreating collection '%s' (size=%d)", QDRANT_COLLECTION, vector_size)
             # recreate_collection is deprecated as of qdrant-client 1.10 --
             # explicit delete (if present) + create is the replacement.
             if qdrant.collection_exists(QDRANT_COLLECTION):
@@ -635,15 +643,19 @@ def _run() -> int:
         # pending_points below reaches UPSERT_BATCH_SIZE, which usually spans
         # several files (most pages produce far fewer than
         # UPSERT_BATCH_SIZE chunks each).
-        print(
-            f"  {progress} embedded  {len(points):3d} chunks  {rel_path}"
-            f"  (buffered {len(pending_points)}/{UPSERT_BATCH_SIZE} pending Qdrant write)"
+        logger.info(
+            "  %s embedded  %3d chunks  %s  (buffered %d/%d pending Qdrant write)",
+            progress,
+            len(points),
+            rel_path,
+            len(pending_points),
+            UPSERT_BATCH_SIZE,
         )
         while len(pending_points) >= UPSERT_BATCH_SIZE:
             batch, pending_points = pending_points[:UPSERT_BATCH_SIZE], pending_points[UPSERT_BATCH_SIZE:]
             qdrant.upsert(collection_name=QDRANT_COLLECTION, points=batch)
             total_upserted += len(batch)
-            print(f"  >>> upserted {len(batch)} chunks to Qdrant ({total_upserted} total so far)")
+            logger.info("  >>> upserted %d chunks to Qdrant (%d total so far)", len(batch), total_upserted)
 
         save_manifest(MANIFEST_PATH, manifest)
 
@@ -653,17 +665,20 @@ def _run() -> int:
         remaining = len(pending_points)
         qdrant.upsert(collection_name=QDRANT_COLLECTION, points=pending_points)
         total_upserted += remaining
-        print(f"  >>> upserted final {remaining} chunks to Qdrant ({total_upserted} total so far)")
+        logger.info("  >>> upserted final %d chunks to Qdrant (%d total so far)", remaining, total_upserted)
     elif force and not collection_ready:
-        print("no content to ingest (no non-empty pages found); leaving collection untouched")
+        logger.info("no content to ingest (no non-empty pages found); leaving collection untouched")
 
     save_manifest(MANIFEST_PATH, manifest)
 
-    print(
-        f"\n{files_with_content} pages changed+ingested, {files_skipped_empty} changed pages now empty, "
-        f"{len(removed_paths)} removed, {total_chunks} chunks embedded this run"
+    logger.info(
+        "%d pages changed+ingested, %d changed pages now empty, %d removed, %d chunks embedded this run",
+        files_with_content,
+        files_skipped_empty,
+        len(removed_paths),
+        total_chunks,
     )
-    print("done")
+    logger.info("done")
     return 0
 
 

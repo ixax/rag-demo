@@ -18,12 +18,13 @@ doesn't need to know its own address.
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 from environs import Env
 from fastapi import FastAPI
 from pydantic import BaseModel
+
+from _common.logging_config import configure_logging, get_logger
 
 from .libs.config import RerankerConfig, load_config
 from .libs.model import load_model, score
@@ -31,13 +32,16 @@ from .libs.model import load_model, score
 env = Env()
 MODEL_RERANKER = env.str("MODEL_RERANKER")
 
+configure_logging()
+logger = get_logger(__name__)
+
 raw_config = load_config(Path("config.yml"))
 raw_config.raw["model"] = MODEL_RERANKER
 config = raw_config.validate(RerankerConfig)
 
-print(f"loading reranker model {config.model} ...", file=sys.stderr)
+logger.info("loading reranker model %s ...", config.model)
 _model = load_model(config.model, config.max_length)
-print("reranker ready", file=sys.stderr)
+logger.info("reranker ready")
 
 app = FastAPI()
 

@@ -63,6 +63,12 @@ x-model-instruct-external: &model-instruct-external "${MODEL_INSTRUCT_EXTERNAL:-
 # can't drift apart.
 x-pipelines-api-key: &pipelines-api-key "${PIPELINES_API_KEY:-0p3n-w3bu!}"
 
+# Log level for ingest/mcp-server/reranker's shared _common.logging_config
+# setup (Python logging level names: DEBUG/INFO/WARNING/ERROR/CRITICAL).
+# Defaults to INFO -- unlike the required vars above, a missing/typo'd
+# value shouldn't stop a service from starting.
+x-log-level: &log-level "${LOG_LEVEL:-INFO}"
+
 services:
   qdrant:
     image: qdrant/qdrant:latest
@@ -193,6 +199,7 @@ services:
       OLLAMA_BASE_URL: *ollama-base-url
       MODEL_EMBED: *model-embed
       FORCE_INGEST: *force-ingest
+      LOG_LEVEL: *log-level
       # Content/state paths, chunking, and upsert batch size live in
       # ingest/config.yml now, not here -- see that file.
     volumes:
@@ -231,6 +238,7 @@ services:
         protocol: tcp
     environment:
       MODEL_RERANKER: *model-reranker
+      LOG_LEVEL: *log-level
     volumes:
       - ./services/reranker/src:/app/src
       - ./services/reranker/config.yml:/app/config.yml
@@ -275,6 +283,7 @@ services:
       MCP_HOST: *mcp-host
       MCP_PORT: *mcp-internal-port
       RERANKER_URL: *reranker-url
+      LOG_LEVEL: *log-level
       # Reranker on/off, TOP_K_RETRIEVE/RERANK, backend.type/max_tokens, and
       # the system prompt live in mcp_server/config.yml now, not here -- see
       # that file. ANTHROPIC_API_KEY/MODEL_INSTRUCT_EXTERNAL stay as env:

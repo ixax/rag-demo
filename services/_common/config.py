@@ -9,12 +9,15 @@ boilerplate, factored out once. Each service still owns its own schema
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 from typing import TypeVar
 
 import yaml
 from pydantic import BaseModel, ValidationError
+
+from _common.logging_config import get_logger
+
+logger = get_logger(__name__)
 
 ConfigT = TypeVar("ConfigT", bound=BaseModel)
 
@@ -32,21 +35,21 @@ class RawConfig:
 
     def validate(self, model_cls: type[ConfigT]) -> ConfigT:
         """Validate the (possibly overridden) raw dict against model_cls.
-        Prints a clear message and exits the process on a schema violation --
+        Logs a clear error and exits the process on a schema violation --
         there's no reasonable way to run with a broken config, so callers
         just get a valid config back or the process exits."""
         try:
             return model_cls.model_validate(self.raw)
         except ValidationError as exc:
-            print(f"invalid {self._path}:\n{exc}", file=sys.stderr)
+            logger.error("invalid %s:\n%s", self._path, exc)
             raise SystemExit(1) from exc
 
 
 def load_raw_config(path: Path) -> RawConfig:
-    """Read path as YAML without validating it yet. Prints a clear message
-    and exits the process if the file is missing."""
+    """Read path as YAML without validating it yet. Logs a clear error and
+    exits the process if the file is missing."""
     if not path.is_file():
-        print(f"missing config file: {path}", file=sys.stderr)
+        logger.error("missing config file: %s", path)
         raise SystemExit(1)
     with path.open(encoding="utf-8") as f:
         raw = yaml.safe_load(f)

@@ -70,6 +70,7 @@ Infra/credentials/deployment settings live in `.env` (copy it from `.env.example
 | `PIPELINES_PORT`          | `9099`                    | `pipelines`'s HTTP port on the host                                                                                                              |
 | `FORCE_INGEST`            | `false`                   | Ingest run mode (see [Ingesting content](#ingesting-content)); a run-mode toggle, not a static setting, so it stays an env var                  |
 | `ANTHROPIC_API_KEY`       | (unset)                   | Required only when `services/mcp_server/config.yml`'s `backend.type` is `anthropic`; a credential, so it stays out of the config file          |
+| `LOG_LEVEL`               | `INFO`                    | Log level for `ingest`/`mcp-server`/`reranker` (`services/_common/logging_config.py`); one of Python logging's level names (`DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`)|
 
 `MODEL_INSTRUCT_INTERNAL`, `MODEL_EMBED`, and `QDRANT_COLLECTION` have no fallback in `docker-compose.yml` (`${VAR:?...}`) — `make up`/`make ingest` fail fast with a clear message if any is unset, rather than silently running against the wrong model/collection. `.env.example` ships working values for all three; copy it to `.env` and you're covered.
 

@@ -12,4 +12,8 @@ def load_model(model_name: str, max_length: int) -> CrossEncoder:
 
 def score(model: CrossEncoder, query: str, documents: list[str]) -> list[float]:
     pairs = [(query, doc) for doc in documents]
-    return [float(s) for s in model.predict(pairs)]
+    # mypy: CrossEncoder.predict's declared input type is a large multimodal
+    # (text/image/audio/video) union; list is invariant, so our plain
+    # list[tuple[str, str]] doesn't satisfy it even though it's a valid
+    # (query, document) pair list at runtime.
+    return [float(s) for s in model.predict(pairs)]  # type: ignore[arg-type]

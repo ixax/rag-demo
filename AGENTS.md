@@ -38,6 +38,10 @@ For any service in this repo backed by an ASGI app (currently just `mcp-server`,
 
 Apply the same pattern to any future ASGI-backed service added here.
 
+## Logging
+
+`ingest`, `mcp-server`, and `reranker` all log via stdlib `logging`, configured once by [`services/_common/logging_config.py`](./services/_common/logging_config.py) (`configure_logging()` + `get_logger(__name__)`) -- no `print()` calls in service code. `LOG_LEVEL` (default `INFO`) is read only inside that module, not by each service's entrypoint, since the setup is identical across all three.
+
 ## Git safety
 
 No `git commit`, `push`, `pull`, `merge`, `rebase`, or any other git operation that changes repo/branch state -- including from a subagent spawned to do something else (e.g. a verification/test agent) -- without an explicit, direct instruction from the user for that specific action. Finding or fixing a bug during an unrelated task (e.g. an e2e test run) is not itself authorization to commit it; report the fix and let the user decide.
