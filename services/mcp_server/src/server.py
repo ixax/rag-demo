@@ -115,7 +115,13 @@ mcp = FastMCP("rag", host=MCP_HOST, port=MCP_PORT)
 
 
 @mcp.tool()
-def search_documents(query: str, top_k: int = config.retrieval.top_k_rerank) -> dict:
+def search_documents(
+    query: str,
+    top_k: int = config.retrieval.top_k_rerank,
+    title: str | None = None,
+    description: str | None = None,
+    source_path: str | None = None,
+) -> dict:
     """Search the RAG knowledge base and return the most relevant document
     chunks, ranked by a cross-encoder reranker. Query can be in Russian or
     English. Use this when you want the raw source excerpts yourself rather
@@ -124,10 +130,15 @@ def search_documents(query: str, top_k: int = config.retrieval.top_k_rerank) -> 
     Args:
         query: natural-language search query.
         top_k: how many reranked chunks to return.
+        title: exact-match filter to a single page's title, if known.
+        description: exact-match filter to a single page's front-matter
+            description, if known.
+        source_path: exact-match filter to a single page's path (as shown in
+            results' source_path field), if known.
 
     Returns a dict:
-        results: list of chunk dicts (title, source_path, heading, text,
-            retrieval_score, rerank_score).
+        results: list of chunk dicts (title, description, source_path,
+            heading, text, retrieval_score, rerank_score).
         trace: list of {"step", "duration_ms"} for each pipeline stage
             (embed_query, qdrant_search, rerank), in call order.
     """
@@ -142,12 +153,21 @@ def search_documents(query: str, top_k: int = config.retrieval.top_k_rerank) -> 
         embed_fn=_embed_fn,
         reranker_enabled=config.reranker.enabled,
         rerank_fn=reranker_client.rerank if reranker_client else None,
+        title=title,
+        description=description,
+        source_path=source_path,
     )
     return {"results": results, "trace": timer.trace}
 
 
 @mcp.tool()
-def answer_question(query: str, top_k: int = config.retrieval.top_k_rerank) -> dict:
+def answer_question(
+    query: str,
+    top_k: int = config.retrieval.top_k_rerank,
+    title: str | None = None,
+    description: str | None = None,
+    source_path: str | None = None,
+) -> dict:
     """Answer a question by retrieving relevant chunks from the RAG knowledge
     base, reranking them, and -- if config.yml's backend.type is set --
     asking that generation backend (local Ollama, or the Claude API) to
@@ -166,6 +186,11 @@ def answer_question(query: str, top_k: int = config.retrieval.top_k_rerank) -> d
     Args:
         query: the user's question.
         top_k: how many reranked chunks to use as context.
+        title: exact-match filter to a single page's title, if known.
+        description: exact-match filter to a single page's front-matter
+            description, if known.
+        source_path: exact-match filter to a single page's path (as shown in
+            context's source_path field), if known.
 
     Returns a dict:
         answer: the answer text; a "not found" message if no chunks matched;
@@ -191,6 +216,9 @@ def answer_question(query: str, top_k: int = config.retrieval.top_k_rerank) -> d
         embed_fn=_embed_fn,
         reranker_enabled=config.reranker.enabled,
         rerank_fn=reranker_client.rerank if reranker_client else None,
+        title=title,
+        description=description,
+        source_path=source_path,
     )
     if not chunks:
         return {
@@ -226,7 +254,7 @@ def answer_question(query: str, top_k: int = config.retrieval.top_k_rerank) -> d
                     user_content,
                 )
             case "ollama":
-                raw = ollama_lib.generate(ollama_client, config.backend.model, config.system_prompt, user_content)
+                raw = ollama_lib.generate(ollama_client, config.backend.model, config.system_prompt, user_content, config.generate_timeout)
             case _:
                 # Unreachable: config.backend.type is a pydantic Literal
                 # ("", "ollama", "anthropic"), and "" already returned above.

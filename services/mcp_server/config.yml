@@ -19,7 +19,7 @@ reranker:
   # adjacent-but-wrong chunk above the actual answer (see AGENTS.md's
   # search-quality notes). Good for quick local iteration, or when the
   # reranker service isn't running.
-  enabled: true
+  enabled: false
 
 # How many chunks to pull and keep at each retrieval stage.
 retrieval:
@@ -92,5 +92,9 @@ system_prompt: |
   entirely when Answer says you don't know.
 
 # Request timeout (seconds) for calls to Ollama's /api/embeddings (query
-# embedding). Number > 0.
+# embedding). Number > 0. Does not apply to generation.
 ollama_timeout: 120
+
+# Request timeout (seconds) for calls to Ollama's /api/chat (generation).
+# Number > 0. Separate from ollama_timeout above, which is embeddings-only.
+generate_timeout: 300

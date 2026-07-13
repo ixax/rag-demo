@@ -13,6 +13,7 @@ Once `make up` has finished and `make status` reports everything healthy:
 | Qdrant REST API | http://localhost:6333 | Raw API (used by `ingest`/`mcp-server`) |
 | mcp-server | http://localhost:8000/mcp | MCP endpoint (streamable HTTP) |
 | Ollama API | http://localhost:11434 | Raw API (used by Open WebUI/`mcp-server`) |
+| pipelines | http://localhost:9099 | Open WebUI Pipelines runtime (used by Open WebUI) |
 
 Ports above are the `.env.example` defaults; if you've overridden `*_PORT` in `.env`, substitute accordingly.
 
@@ -20,7 +21,8 @@ Ports above are the `.env.example` defaults; if you've overridden `*_PORT` in `.
 - **[Ollama](https://ollama.com/)** — runs two local models on CPU:
   - an instruct model, used for answer generation (and available for content cleaning),
   - an embedding model, used both at ingest time and at query time.
-- **[Open WebUI](https://openwebui.com/)** — a simple, ChatGPT-like chat frontend wired to Ollama out of the box.
+- **[Open WebUI](https://openwebui.com/)** — a simple, ChatGPT-like chat frontend wired to Ollama out of the box, plus the `pipelines` connection below.
+- **`pipelines`** — [Open WebUI Pipelines](https://github.com/open-webui/pipelines) runtime, registered in Open WebUI as an OpenAI-compatible connection. Loads [`services/open_webui_pipelines/rag_pipeline.py`](./services/open_webui_pipelines/rag_pipeline.py), which shows up as its own selectable model, **RAG (UE Docs)**, in Open WebUI's model picker. Selecting it and asking a question calls `mcp-server`'s `answer_question` tool directly over MCP and returns its answer — no chat model or tool-calling involved.
 - **`ingest`** — one-shot job that walks `./content`, chunks/cleans the Hugo markdown, embeds it, and upserts it into Qdrant. See [`services/ingest/`](./services/ingest).
 - **`mcp-server`** — an MCP server exposing retrieval-augmented search/answering (embed query → Qdrant search → cross-encoder rerank → Ollama generation) over streamable HTTP, for use as a remote MCP connector from Open WebUI and Claude. See [`services/mcp_server/`](./services/mcp_server).
 
@@ -65,12 +67,15 @@ Infra/credentials/deployment settings live in `.env` (copy it from `.env.example
 | `OLLAMA_PORT`             | `11434`                   | Ollama API port on the host                                                                                                                     |
 | `OPEN_WEBUI_PORT`         | `3000`                    | Open WebUI port on the host                                                                                                                     |
 | `MCP_SERVER_PORT`         | `8000`                    | `mcp-server`'s streamable-HTTP port on the host                                                                                                 |
+| `PIPELINES_PORT`          | `9099`                    | `pipelines`'s HTTP port on the host                                                                                                              |
 | `FORCE_INGEST`            | `false`                   | Ingest run mode (see [Ingesting content](#ingesting-content)); a run-mode toggle, not a static setting, so it stays an env var                  |
 | `ANTHROPIC_API_KEY`       | (unset)                   | Required only when `services/mcp_server/config.yml`'s `backend.type` is `anthropic`; a credential, so it stays out of the config file          |
 
 `MODEL_INSTRUCT_INTERNAL`, `MODEL_EMBED`, and `QDRANT_COLLECTION` have no fallback in `docker-compose.yml` (`${VAR:?...}`) — `make up`/`make ingest` fail fast with a clear message if any is unset, rather than silently running against the wrong model/collection. `.env.example` ships working values for all three; copy it to `.env` and you're covered.
 
 Both Ollama models are CPU-sized on purpose (3B instruct model, small embedding model) so the stack runs without a GPU. Swap them for larger models in `.env` if you have the hardware, then run `make pull-models`.
+
+On a host with an NVIDIA GPU reachable from Docker (Windows + Docker Desktop/WSL2, or Linux with the NVIDIA Container Toolkit), run `make up-gpu` instead of `make up` to reserve it for `ollama` — see [`docker-compose.gpu.yml`](./docker-compose.gpu.yml) for requirements. Not applicable on macOS (no GPU passthrough into Docker containers there, Metal or otherwise). Only `ollama` is covered; `reranker` still runs on CPU (its Dockerfile installs the CPU-only torch wheel).
 
 ### `config.yml` files
 
@@ -84,10 +89,19 @@ Both `ingest` and `mcp-server` are bind-mounted (`./services/ingest:/app`-equiva
 
 `MODEL_EMBED` candidates were benchmarked with [`.claude/agents/embed-model-bench.md`](./.claude/agents/embed-model-bench.md) — a Claude Code subagent with a fixed RU/EN documentation-style corpus baked into its own instructions (8 docs across 4 topics, 6 queries incl. cross-lingual, a long-text truncation probe) so every model is scored against identical input. Re-run it (via the `Agent` tool, `subagent_type: embed-model-bench`) to re-check a model after an Ollama update.
 
-| Model | Dim | Context | Latency (warm) | Top-1 / MRR | Params / quant |
-|-------|-----|---------|-----------------|-------------|-----------------|
-| `bge-m3` | 1024 | 8192 tokens | ~0.6–2.2s | 6/6, 1.00 | 566M, F16, ~1.2GB |
-| `qllama/multilingual-e5-base` | 768 | 512 tokens | ~0.5–0.7s | 6/6, 1.00 | 277M, Q8_0 |
+Current: `embeddinggemma:300m`. Also benchmarked:
+
+| Model | Dim | Context | Latency (warm) | Top-1 / MRR | Params / quant | Result |
+|---|---|---|---|---|---|---|
+| `embeddinggemma:300m` | 768 | 2048 tokens | ~260-520ms | 6/6, 1.00 | 307.6M, BF16 | **Current.** Smallest candidate that clears the 512-token ceiling below; fastest of the models that passed every check. |
+| `bge-m3` | 1024 | 8192 tokens | ~0.6-2.2s | 6/6, 1.00 | 567M, F16, ~1.2GB | Previous `MODEL_EMBED`. Same accuracy as `embeddinggemma:300m` but ~2x the params and slower per call. |
+| `qwen3-embedding:0.6b` | 1024 | 32768 tokens | ~2-3.5s | 6/6, 1.00 | 595.8M, Q8_0 | Essentially the same size as `bge-m3`, and 6-10x slower per call than `embeddinggemma:300m` in steady state. |
+| `qllama/multilingual-e5-base` | 768 | 512 tokens | ~0.5-0.7s | 6/6, 1.00 | 277M, Q8_0 | Fast, but same 512-token ceiling as the row below. |
+| `granite-embedding:278m`, `paraphrase-multilingual` | 768 | 512 tokens | fast | 6/6, 1.00 | 278M | Error out (HTTP 500, not silent truncation) on inputs over ~512 tokens -- too small a context window for this repo's `chunking.max_chars: 1800`. |
+| `nomic-embed-text-v2-moe`, `mxbai-embed-large` | — | 512 tokens | — | — | 475M, 335M | Same 512-token ceiling as above. |
+| `multilingual-e5-small`, `multilingual-e5-base` (bare tags) | — | — | — | — | — | Not available on Ollama's registry under those bare tags -- Hugging Face names, not Ollama ones (see `qllama/multilingual-e5-base` above for the actual Ollama tag). |
+
+Switching `MODEL_EMBED` requires a full `make ingest-force` — a different model means a different vector dimension, so existing points in the Qdrant collection aren't comparable to newly embedded queries.
 
 ## Make targets
 
@@ -121,6 +135,14 @@ curl http://localhost:6333/collections/content
 ## Ingesting content
 
 `make ingest` walks `./content`, strips Hugo shortcodes/HTML, chunks each page by heading, embeds each chunk with `MODEL_EMBED`, and upserts into the `QDRANT_COLLECTION` collection. Re-running it only touches files that changed since the last run (tracked in a manifest); `make ingest-force` rebuilds the collection from scratch. See [`services/ingest/`](./services/ingest) for details.
+
+`make ingest` (no force) auto-escalates to a full rebuild if `QDRANT_COLLECTION` doesn't exist yet or exists but has zero points, regardless of what the manifest says -- the manifest is keyed by file path, not by collection name, so switching `QDRANT_COLLECTION` without wiping the manifest would otherwise leave the new collection empty.
+
+`make ingest-force` drops and recreates the collection (`recreate_collection` -- delete + create) the moment the first non-empty file is embedded, then upserts as it goes; it does not wait until every file has been processed. If literally every file is empty/draft, the existing collection is left untouched (neither wiped nor recreated).
+
+Change detection (incremental mode) is per-file, not per-chunk: each file's SHA-256 (raw bytes) is compared against the hash stored for it in the manifest (`STATE_DIR/manifest.json`). A new file, or one whose hash no longer matches, has all of its existing Qdrant points deleted (matched by the `source_path` payload field) and every one of its chunks re-embedded and re-upserted -- there's no partial/paragraph-level diffing within a file. A file removed from `./content` has its points deleted and its manifest entry dropped. Files that didn't change are skipped entirely -- no delete, no re-embed, no re-upsert.
+
+Progress is logged per file as `[i/N, X%]`, and both the manifest and any already-embedded points are saved incrementally as the run goes (not buffered until the end) -- an interrupted run keeps whatever it completed up to that point instead of losing the whole run.
 
 ## Claude Code skills for maintaining Qdrant
 

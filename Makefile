@@ -6,11 +6,18 @@ OLLAMA_PORT ?= 11434
 OPEN_WEBUI_PORT ?= 3000
 MCP_SERVER_PORT ?= 8000
 RERANKER_PORT_HOST ?= 50051
+PIPELINES_PORT ?= 9099
 
-.PHONY: up down restart status ps logs pull-models ingest ingest-force mcp-logs reranker-logs clean
+.PHONY: up up-gpu down restart status ps logs pull-models ingest ingest-force mcp-logs reranker-logs clean
 
 up:
 	docker compose up -d
+
+# For hosts with an NVIDIA GPU reachable from Docker (Windows + Docker
+# Desktop/WSL2, or Linux with the NVIDIA Container Toolkit) -- see
+# docker-compose.gpu.yml for requirements. Not applicable on macOS.
+up-gpu:
+	docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
 
 down:
 	docker compose down
@@ -36,6 +43,9 @@ status ps:
 	@bash -c '</dev/tcp/localhost/$(RERANKER_PORT_HOST)' 2>/dev/null \
 		&& echo "  reranker:    OK  (http://localhost:$(RERANKER_PORT_HOST))" \
 		|| echo "  reranker:    NOT RESPONDING"
+	@curl -sf http://localhost:$(PIPELINES_PORT)/ >/dev/null \
+		&& echo "  pipelines:   OK  (http://localhost:$(PIPELINES_PORT))" \
+		|| echo "  pipelines:   NOT RESPONDING"
 
 logs:
 	docker compose logs -f

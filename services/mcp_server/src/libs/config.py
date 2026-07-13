@@ -45,6 +45,7 @@ class MCPServerConfig(BaseModel):
     backend: BackendConfig
     system_prompt: str
     ollama_timeout: float = Field(gt=0)
+    generate_timeout: float = Field(gt=0)
 
 
 def load_config(path: Path) -> RawConfig:

@@ -39,10 +39,12 @@ from environs import Env
 from pydantic import BaseModel, Field
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
+    Datatype,
     Distance,
     FieldCondition,
     Filter,
     MatchValue,
+    PayloadSchemaType,
     PointStruct,
     VectorParams,
 )
@@ -501,8 +503,17 @@ def _run() -> int:
     force = FORCE_INGEST
     qdrant = QdrantClient(url=QDRANT_URL)
 
+    # The manifest is keyed by file path, not by collection -- switching
+    # QDRANT_COLLECTION without wiping/renaming the manifest would otherwise
+    # make an incremental run think a brand-new (or emptied) collection is
+    # already fully indexed and write nothing to it. Force a full rebuild
+    # whenever the target collection is missing or has no points, regardless
+    # of what the manifest says.
     if not force and not qdrant.collection_exists(QDRANT_COLLECTION):
         print(f"collection '{QDRANT_COLLECTION}' does not exist yet -- forcing a full rebuild")
+        force = True
+    elif not force and qdrant.count(QDRANT_COLLECTION, exact=True).count == 0:
+        print(f"collection '{QDRANT_COLLECTION}' exists but is empty -- forcing a full rebuild")
         force = True
 
     old_manifest = {} if force else load_manifest(MANIFEST_PATH)
@@ -551,12 +562,25 @@ def _run() -> int:
 
     ollama_client = build_client(OLLAMA_BASE_URL, OLLAMA_TIMEOUT)
     embed_fn = functools.partial(embed_query, ollama_client, MODEL_EMBED)
-    total_points: list[PointStruct] = []
     files_with_content = 0
     files_skipped_empty = 0
     total_chunks = 0
+    total_upserted = 0
+    # False only in force mode, until the first non-empty file's points tell
+    # us vector_size -- recreate_collection happens then, not after every
+    # file has already been walked/embedded. pending_points is a rolling
+    # buffer flushed every UPSERT_BATCH_SIZE (and the manifest is saved after
+    # every file), instead of the whole run's points sitting in memory until
+    # one write at the very end -- a crash partway through a large run (e.g.
+    # Ollama times out on file 150/263) now keeps whatever was embedded and
+    # upserted so far, rather than losing the entire run.
+    collection_ready = not force
+    pending_points: list[PointStruct] = []
 
-    for rel_path in sorted(changed_paths):
+    sorted_changed_paths = sorted(changed_paths)
+    total_changed = len(sorted_changed_paths)
+    for i, rel_path in enumerate(sorted_changed_paths, start=1):
+        progress = f"[{i}/{total_changed}, {round(100 * i / total_changed)}%]"
         if not force:
             delete_points_for_path(qdrant, rel_path)
 
@@ -574,29 +598,63 @@ def _run() -> int:
 
         if not points:
             files_skipped_empty += 1
-            print(f"  skipped   (empty)  {rel_path}")
+            print(f"  {progress} skipped   (empty)  {rel_path}")
+            save_manifest(MANIFEST_PATH, manifest)
             continue
 
         files_with_content += 1
         total_chunks += len(points)
-        total_points.extend(points)
-        print(f"  embedded  {len(points):3d} chunks  {rel_path}")
+
+        if not collection_ready:
+            vector_size = len(points[0].vector)
+            print(f"recreating collection '{QDRANT_COLLECTION}' (size={vector_size})")
+            # recreate_collection is deprecated as of qdrant-client 1.10 --
+            # explicit delete (if present) + create is the replacement.
+            if qdrant.collection_exists(QDRANT_COLLECTION):
+                qdrant.delete_collection(QDRANT_COLLECTION)
+            qdrant.create_collection(
+                collection_name=QDRANT_COLLECTION,
+                # float16 halves on-disk/in-memory vector size vs. the
+                # float32 default, with no measurable precision loss for
+                # cosine search.
+                vectors_config=VectorParams(size=vector_size, distance=Distance.COSINE, datatype=Datatype.FLOAT16),
+            )
+            # Created before points are upserted -- payload indexes created
+            # after HNSW is built don't get the extra filterable-vector-search
+            # links. Keyword (exact-match) indexes for the fields
+            # mcp-server's retrieve() can filter on (see libs/retrieval.py).
+            for field_name in ("title", "description", "source_path"):
+                qdrant.create_payload_index(
+                    collection_name=QDRANT_COLLECTION, field_name=field_name, field_schema=PayloadSchemaType.KEYWORD
+                )
+            collection_ready = True
+
+        pending_points.extend(points)
+        # Embedding (above) already happened; this chunk count is buffered in
+        # memory, not yet written to Qdrant -- that only happens once
+        # pending_points below reaches UPSERT_BATCH_SIZE, which usually spans
+        # several files (most pages produce far fewer than
+        # UPSERT_BATCH_SIZE chunks each).
+        print(
+            f"  {progress} embedded  {len(points):3d} chunks  {rel_path}"
+            f"  (buffered {len(pending_points)}/{UPSERT_BATCH_SIZE} pending Qdrant write)"
+        )
+        while len(pending_points) >= UPSERT_BATCH_SIZE:
+            batch, pending_points = pending_points[:UPSERT_BATCH_SIZE], pending_points[UPSERT_BATCH_SIZE:]
+            qdrant.upsert(collection_name=QDRANT_COLLECTION, points=batch)
+            total_upserted += len(batch)
+            print(f"  >>> upserted {len(batch)} chunks to Qdrant ({total_upserted} total so far)")
+
+        save_manifest(MANIFEST_PATH, manifest)
 
     ollama_client.close()
 
-    if total_points:
-        if force:
-            vector_size = len(total_points[0].vector)
-            print(f"recreating collection '{QDRANT_COLLECTION}' (size={vector_size})")
-            qdrant.recreate_collection(
-                collection_name=QDRANT_COLLECTION,
-                vectors_config=VectorParams(size=vector_size, distance=Distance.COSINE),
-            )
-        for i in range(0, len(total_points), UPSERT_BATCH_SIZE):
-            batch = total_points[i : i + UPSERT_BATCH_SIZE]
-            qdrant.upsert(collection_name=QDRANT_COLLECTION, points=batch)
-            print(f"  upserted {min(i + UPSERT_BATCH_SIZE, len(total_points))}/{len(total_points)}")
-    elif force:
+    if pending_points:
+        remaining = len(pending_points)
+        qdrant.upsert(collection_name=QDRANT_COLLECTION, points=pending_points)
+        total_upserted += remaining
+        print(f"  >>> upserted final {remaining} chunks to Qdrant ({total_upserted} total so far)")
+    elif force and not collection_ready:
         print("no content to ingest (no non-empty pages found); leaving collection untouched")
 
     save_manifest(MANIFEST_PATH, manifest)

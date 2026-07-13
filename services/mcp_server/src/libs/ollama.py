@@ -14,7 +14,7 @@ from __future__ import annotations
 import httpx
 
 
-def generate(client: httpx.Client, model: str, system_prompt: str, user_content: str) -> str:
+def generate(client: httpx.Client, model: str, system_prompt: str, user_content: str, timeout: float) -> str:
     resp = client.post(
         "/api/chat",
         json={
@@ -25,6 +25,7 @@ def generate(client: httpx.Client, model: str, system_prompt: str, user_content:
             ],
             "stream": False,
         },
+        timeout=timeout,
     )
     resp.raise_for_status()
     return resp.json()["message"]["content"]

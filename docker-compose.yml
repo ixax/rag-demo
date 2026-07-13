@@ -10,6 +10,7 @@ x-ollama-port: &ollama-port "${OLLAMA_PORT:-11434}:11434"
 x-open-webui-port: &open-webui-port "${OPEN_WEBUI_PORT:-3000}:8080"
 x-mcp-server-published-port: &mcp-server-published-port "${MCP_SERVER_PORT:-8000}"
 x-reranker-published-port: &reranker-published-port "${RERANKER_PORT_HOST:-50051}"
+x-pipelines-port: &pipelines-port "${PIPELINES_PORT:-9099}:9099"
 
 # mcp-server's own bind address/port *inside* its container -- this is not
 # the host-exposed port above (that's how it's reached from outside Docker;
@@ -41,6 +42,8 @@ x-force-ingest: &force-ingest ${FORCE_INGEST:-false}
 x-qdrant-url: &qdrant-url "http://qdrant:6333"
 x-ollama-base-url: &ollama-base-url "http://ollama:11434"
 x-reranker-url: &reranker-url "http://reranker:50051"
+x-mcp-url: &mcp-url "http://mcp-server:8000/mcp"
+x-pipelines-url: &pipelines-url "http://pipelines:9099"
 
 # Required, no default -- fails fast with a clear message if unset, instead
 # of silently ingesting into/serving from the wrong collection or model.
@@ -54,6 +57,11 @@ x-model-instruct-internal: &model-instruct-internal ${MODEL_INSTRUCT_INTERNAL:?s
 # services/mcp_server/src/server.py, which fails fast itself if it's unset
 # in that case).
 x-model-instruct-external: &model-instruct-external "${MODEL_INSTRUCT_EXTERNAL:-}"
+
+# Auth key the pipelines service and Open WebUI's OpenAI-compatible
+# connection to it must agree on -- both read from the same anchor so they
+# can't drift apart.
+x-pipelines-api-key: &pipelines-api-key "${PIPELINES_API_KEY:-0p3n-w3bu!}"
 
 services:
   qdrant:
@@ -110,11 +118,65 @@ services:
       - *open-webui-port
     environment:
       OLLAMA_BASE_URL: *ollama-base-url
+      # Registers the pipelines service (below) as an OpenAI-compatible
+      # connection, so its rag_pipeline.py shows up as its own selectable
+      # model ("RAG (UE Docs)") in the chat model picker -- distinct from
+      # the Ollama models, and not a slash command or a tool a chat model
+      # has to decide to call.
+      OPENAI_API_BASE_URLS: *pipelines-url
+      OPENAI_API_KEYS: *pipelines-api-key
+      # Open WebUI persists connection settings (openai.api_base_urls/
+      # api_keys, among others) to its DB and only seeds them from these
+      # env vars on a completely empty DB -- on any already-initialized
+      # openwebui_data volume, the env vars above are otherwise silently
+      # ignored. This forces config to always resolve from the environment
+      # instead (admin-panel edits to persistent config then don't stick,
+      # by the same mechanism).
+      ENABLE_PERSISTENT_CONFIG: "false"
     volumes:
       - openwebui_data:/app/backend/data
     depends_on:
       ollama:
         condition: service_healthy
+      pipelines:
+        condition: service_healthy
+
+  # Open WebUI "Pipelines" runtime: hosts services/open_webui_pipelines/
+  # scripts and exposes them as OpenAI-compatible models via its own HTTP
+  # API, which open-webui above connects to like any other OpenAI backend.
+  # rag_pipeline.py itself calls mcp-server's answer_question tool directly
+  # over MCP (streamable-http) -- no dependency on a chat model's
+  # tool-calling.
+  pipelines:
+    build:
+      # Own directory as context, not root -- unlike ingest/reranker/
+      # mcp-server, this service doesn't use services/_common.
+      context: ./services/open_webui_pipelines
+    container_name: rag-pipelines
+    restart: unless-stopped
+    ports:
+      - *pipelines-port
+    environment:
+      PIPELINES_API_KEY: *pipelines-api-key
+      RAG_MCP_URL: *mcp-url
+    volumes:
+      # pipelines writes its own runtime state (per-module valves.json, a
+      # failed/ dir on load errors, __pycache__) into this same directory --
+      # services/open_webui_pipelines/pipelines/.gitignore whitelists only
+      # *.py so that doesn't dirty the repo.
+      - ./services/open_webui_pipelines/pipelines:/app/pipelines
+      - pipelines_cache:/app/cache
+    depends_on:
+      mcp-server:
+        condition: service_started
+    healthcheck:
+      # Unlike ollama/mcp-server's images, this one has curl -- use it
+      # directly instead of the raw-TCP /dev/tcp workaround those need.
+      test: ["CMD", "curl", "-f", "http://localhost:9099/"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
 
   ingest:
     build:
@@ -243,3 +305,4 @@ volumes:
   openwebui_data:
   ingest_state:
   reranker_cache:
+  pipelines_cache:
