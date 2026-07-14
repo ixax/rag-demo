@@ -21,10 +21,13 @@ class RerankerClient:
     from the environment here."""
 
     def __init__(self, url: str) -> None:
-        # Reranker model inference can take several seconds, especially
-        # for the first request or with many documents. Use a 30s timeout
-        # to avoid ReadTimeout errors.
-        self._client = httpx.Client(base_url=url, timeout=30.0)
+        # Reranker model inference can take a while, especially on a cold
+        # model load, a loaded host, or (see top_k_retrieve in config.yml)
+        # a larger candidate batch -- 30s wasn't enough headroom once
+        # top_k_retrieve went from 10 to 20 candidates, observed timing out
+        # at exactly 30s. 120s matches the other generation-adjacent
+        # timeouts in this codebase (ollama_timeout, generate_timeout).
+        self._client = httpx.Client(base_url=url, timeout=120.0)
 
     def rerank(self, query: str, documents: list[str]) -> list[float]:
         resp = self._client.post("/rerank", json={"query": query, "documents": documents})

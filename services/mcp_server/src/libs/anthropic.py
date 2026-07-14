@@ -1,4 +1,9 @@
-"""Anthropic-specific calls: client construction and chat generation.
+"""Anthropic Messages API (SDK) calls -- token-billed generation only.
+
+Used for search_tools.backend.type: "anthropic_token" and anthropic_chat's
+auth: "token". Subscription-billed generation (anthropic_subscription /
+auth: "subscription") does not go through this module or the SDK at all --
+see libs/claude_cli.py for why and how.
 
 No environment variables are read here -- api_key/model/max_tokens all come
 in as arguments from server.py, which is the only place that reads
@@ -8,6 +13,8 @@ env/config (ANTHROPIC_API_KEY included).
 from __future__ import annotations
 
 import anthropic
+
+from .generation import GenerationResult
 
 
 def build_client(api_key: str) -> anthropic.Anthropic:
@@ -20,7 +27,7 @@ def generate(
     max_tokens: int,
     system_prompt: str,
     user_content: str,
-) -> str:
+) -> GenerationResult:
     # Thinking omitted (off) -- this is a direct grounded-QA task, not
     # open-ended reasoning, and the system prompt already asks the model for
     # an explicit Reasoning section, so adaptive thinking would just
@@ -32,8 +39,10 @@ def generate(
         messages=[{"role": "user", "content": user_content}],
     )
     if resp.stop_reason == "refusal":
-        return (
+        text = (
             "Reasoning: request declined by the model's safety filters.\n\n"
             "Answer: The model declined to answer this query."
         )
-    return "".join(block.text for block in resp.content if block.type == "text")
+    else:
+        text = "".join(block.text for block in resp.content if block.type == "text")
+    return GenerationResult(text=text, input_tokens=resp.usage.input_tokens, output_tokens=resp.usage.output_tokens)

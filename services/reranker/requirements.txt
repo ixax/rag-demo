@@ -5,3 +5,6 @@ torch==2.4.1
 PyYAML==6.0.2
 pydantic==2.13.4
 environs==15.0.1
+opentelemetry-sdk==1.38.0
+opentelemetry-exporter-otlp-proto-grpc==1.38.0
+opentelemetry-instrumentation-fastapi==0.59b0

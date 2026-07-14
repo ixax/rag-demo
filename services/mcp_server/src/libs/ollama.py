@@ -13,8 +13,10 @@ from __future__ import annotations
 
 import httpx
 
+from .generation import GenerationResult
 
-def generate(client: httpx.Client, model: str, system_prompt: str, user_content: str, timeout: float) -> str:
+
+def generate(client: httpx.Client, model: str, system_prompt: str, user_content: str, timeout: float) -> GenerationResult:
     resp = client.post(
         "/api/chat",
         json={
@@ -28,4 +30,7 @@ def generate(client: httpx.Client, model: str, system_prompt: str, user_content:
         timeout=timeout,
     )
     resp.raise_for_status()
-    return resp.json()["message"]["content"]
+    # input_tokens/output_tokens zeroed rather than read from
+    # prompt_eval_count/eval_count -- token accounting for this backend
+    # isn't tracked, by design (it's the free/local path).
+    return GenerationResult(text=resp.json()["message"]["content"], input_tokens=0, output_tokens=0)

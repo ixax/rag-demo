@@ -6,3 +6,6 @@ environs==15.0.1
 # ingest.py imports it directly now (_common.config's config.yml schema
 # validation, shared with mcp-server/reranker).
 pydantic==2.13.4
+opentelemetry-sdk==1.38.0
+opentelemetry-exporter-otlp-proto-grpc==1.38.0
+opentelemetry-instrumentation-httpx==0.59b0

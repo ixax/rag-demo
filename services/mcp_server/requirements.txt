@@ -8,3 +8,6 @@ environs==15.0.1
 # already a transitive dep of anthropic/mcp -- pinned explicitly since
 # server.py imports it directly (config.yml schema validation).
 pydantic==2.13.4
+opentelemetry-sdk==1.38.0
+opentelemetry-exporter-otlp-proto-grpc==1.38.0
+opentelemetry-instrumentation-httpx==0.59b0

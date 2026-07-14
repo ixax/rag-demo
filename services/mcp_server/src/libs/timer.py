@@ -1,8 +1,16 @@
-"""Wall-clock timing for the RAG pipeline's `trace` response field."""
+"""Wall-clock timing for the RAG pipeline's `trace` response field -- and,
+when OTEL_EXPORTER_OTLP_ENDPOINT is configured, the matching OTel span tree.
+Both are two views of the same step boundaries: every `with timer(step):`
+block already marks a pipeline stage, so it doubles as a span without
+touching any of retrieval.py's/server.py's call sites."""
 
 from __future__ import annotations
 
 import time
+
+from _common.tracing import get_tracer
+
+_tracer = get_tracer(__name__)
 
 
 class StepTimer:
@@ -23,7 +31,12 @@ class _Step:
 
     def __enter__(self) -> None:
         self._start = time.monotonic()
+        # get_tracer() returns a real no-op tracer when tracing isn't
+        # configured, so this context manager is cheap either way.
+        self._span_cm = _tracer.start_as_current_span(self._step)
+        self._span_cm.__enter__()
 
     def __exit__(self, *exc_info) -> None:
         duration_ms = (time.monotonic() - self._start) * 1000
         self._timer.trace.append({"step": self._step, "duration_ms": round(duration_ms, 1)})
+        self._span_cm.__exit__(*exc_info)

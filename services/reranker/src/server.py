@@ -22,9 +22,11 @@ from pathlib import Path
 
 from environs import Env
 from fastapi import FastAPI
+from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from pydantic import BaseModel
 
 from _common.logging_config import configure_logging, get_logger
+from _common.tracing import configure_tracing, get_tracer
 
 from .libs.config import RerankerConfig, load_config
 from .libs.model import load_model, score
@@ -35,6 +37,9 @@ MODEL_RERANKER = env.str("MODEL_RERANKER")
 configure_logging()
 logger = get_logger(__name__)
 
+configure_tracing("reranker")
+tracer = get_tracer(__name__)
+
 raw_config = load_config(Path("config.yml"))
 raw_config.raw["model"] = MODEL_RERANKER
 config = raw_config.validate(RerankerConfig)
@@ -44,6 +49,11 @@ _model = load_model(config.model, config.max_length)
 logger.info("reranker ready")
 
 app = FastAPI()
+# Extracts the incoming W3C trace-context header (mcp-server's httpx client
+# is instrumented too -- see _common.tracing.configure_tracing) so this
+# service's spans nest under the caller's "rerank" step instead of starting
+# a disconnected trace, and auto-creates a server span per request.
+FastAPIInstrumentor.instrument_app(app)
 
 
 class RerankRequest(BaseModel):
@@ -59,4 +69,7 @@ class RerankResponse(BaseModel):
 
 @app.post("/rerank")
 def rerank(request: RerankRequest) -> RerankResponse:
-    return RerankResponse(scores=score(_model, request.query, request.documents))
+    with tracer.start_as_current_span("score") as span:
+        span.set_attribute("rag.model", config.model)
+        span.set_attribute("rag.num_documents", len(request.documents))
+        return RerankResponse(scores=score(_model, request.query, request.documents))

@@ -52,6 +52,7 @@ from qdrant_client.models import (
 from _common.config import load_yaml_config
 from _common.logging_config import configure_logging, get_logger
 from _common.ollama import build_client, embed_query
+from _common.tracing import configure_tracing, get_tracer
 
 # env.str(name)/env.bool(name) raise a clear environs.EnvError if the
 # variable is unset -- no hand-rolled _require_env needed (was copy-pasted
@@ -70,6 +71,9 @@ FORCE_INGEST = env.bool("FORCE_INGEST")
 
 configure_logging()
 logger = get_logger(__name__)
+
+configure_tracing("ingest")
+tracer = get_tracer(__name__)
 
 # Pipeline tuning knobs (content/state paths, chunking, upsert batch size)
 # live in config.yml, not the environment -- see that file for the full
@@ -514,6 +518,11 @@ def main() -> int:
 
 
 def _run() -> int:
+    with tracer.start_as_current_span("ingest_run") as run_span:
+        return _run_traced(run_span)
+
+
+def _run_traced(run_span) -> int:
     if not CONTENT_DIR.is_dir():
         logger.error("content dir not found: %s", CONTENT_DIR)
         return 1
@@ -534,6 +543,8 @@ def _run() -> int:
         logger.info("collection '%s' exists but is empty -- forcing a full rebuild", QDRANT_COLLECTION)
         force = True
 
+    run_span.set_attribute("ingest.force", force)
+
     old_manifest = {} if force else load_manifest(MANIFEST_PATH)
     logger.info(
         "FORCE_INGEST=true -- full rebuild"
@@ -543,6 +554,7 @@ def _run() -> int:
 
     files = list(iter_content_files(CONTENT_DIR))
     logger.info("found %d markdown files under %s", len(files), CONTENT_DIR)
+    run_span.set_attribute("ingest.total_files", len(files))
     files_by_rel = {str(p.relative_to(CONTENT_DIR)): p for p in files}
     current_hashes = {rel: file_hash(p) for rel, p in files_by_rel.items()}
 
@@ -569,6 +581,9 @@ def _run() -> int:
             if rel not in old_manifest or old_manifest[rel].get("hash") != h
         }
         removed_paths = set(old_manifest) - set(current_hashes)
+
+    run_span.set_attribute("ingest.changed_files", len(changed_paths))
+    run_span.set_attribute("ingest.removed_files", len(removed_paths))
 
     if not force and not changed_paths and not removed_paths:
         logger.info("nothing changed since last run -- done")
@@ -603,81 +618,88 @@ def _run() -> int:
     total_changed = len(sorted_changed_paths)
     for i, rel_path in enumerate(sorted_changed_paths, start=1):
         progress = f"[{i}/{total_changed}, {round(100 * i / total_changed)}%]"
-        if not force:
-            delete_points_for_path(qdrant, rel_path)
+        with tracer.start_as_current_span("ingest_file") as file_span:
+            file_span.set_attribute("ingest.rel_path", rel_path)
+            if not force:
+                delete_points_for_path(qdrant, rel_path)
 
-        page = load_page(files_by_rel[rel_path])
-        if page.meta.get("draft") is True:
-            points: list[PointStruct] = []
-        else:
-            params = page.meta.get("params") or {}
-            clean_text = clean_body(page.body, params)
-            parts = Path(rel_path).parts
-            section_title = section_titles.get(parts[0]) if len(parts) > 1 else None
-            points = build_points(page, clean_text, embed_fn, section_title)
+            page = load_page(files_by_rel[rel_path])
+            if page.meta.get("draft") is True:
+                points: list[PointStruct] = []
+            else:
+                params = page.meta.get("params") or {}
+                clean_text = clean_body(page.body, params)
+                parts = Path(rel_path).parts
+                section_title = section_titles.get(parts[0]) if len(parts) > 1 else None
+                points = build_points(page, clean_text, embed_fn, section_title)
+            file_span.set_attribute("ingest.chunk_count", len(points))
 
-        manifest[rel_path] = {"hash": current_hashes[rel_path], "chunk_count": len(points)}
+            manifest[rel_path] = {"hash": current_hashes[rel_path], "chunk_count": len(points)}
 
-        if not points:
-            files_skipped_empty += 1
-            logger.info("  %s skipped   (empty)  %s", progress, rel_path)
-            save_manifest(MANIFEST_PATH, manifest)
-            continue
+            if not points:
+                files_skipped_empty += 1
+                logger.info("  %s skipped   (empty)  %s", progress, rel_path)
+                save_manifest(MANIFEST_PATH, manifest)
+                continue
 
-        files_with_content += 1
-        total_chunks += len(points)
+            files_with_content += 1
+            total_chunks += len(points)
 
-        if not collection_ready:
-            vector_size = len(points[0].vector)
-            logger.info("recreating collection '%s' (size=%d)", QDRANT_COLLECTION, vector_size)
-            # recreate_collection is deprecated as of qdrant-client 1.10 --
-            # explicit delete (if present) + create is the replacement.
-            if qdrant.collection_exists(QDRANT_COLLECTION):
-                qdrant.delete_collection(QDRANT_COLLECTION)
-            qdrant.create_collection(
-                collection_name=QDRANT_COLLECTION,
-                # float16 halves on-disk/in-memory vector size vs. the
-                # float32 default, with no measurable precision loss for
-                # cosine search.
-                vectors_config=VectorParams(size=vector_size, distance=Distance.COSINE, datatype=Datatype.FLOAT16),
-            )
-            # Created before points are upserted -- payload indexes created
-            # after HNSW is built don't get the extra filterable-vector-search
-            # links. Keyword (exact-match) indexes for the fields
-            # mcp-server's retrieve() can filter on (see libs/retrieval.py).
-            for field_name in ("title", "description", "source_path"):
-                qdrant.create_payload_index(
-                    collection_name=QDRANT_COLLECTION, field_name=field_name, field_schema=PayloadSchemaType.KEYWORD
+            if not collection_ready:
+                vector_size = len(points[0].vector)
+                logger.info("recreating collection '%s' (size=%d)", QDRANT_COLLECTION, vector_size)
+                # recreate_collection is deprecated as of qdrant-client 1.10 --
+                # explicit delete (if present) + create is the replacement.
+                if qdrant.collection_exists(QDRANT_COLLECTION):
+                    qdrant.delete_collection(QDRANT_COLLECTION)
+                qdrant.create_collection(
+                    collection_name=QDRANT_COLLECTION,
+                    # float16 halves on-disk/in-memory vector size vs. the
+                    # float32 default, with no measurable precision loss for
+                    # cosine search.
+                    vectors_config=VectorParams(size=vector_size, distance=Distance.COSINE, datatype=Datatype.FLOAT16),
                 )
-            collection_ready = True
+                # Created before points are upserted -- payload indexes created
+                # after HNSW is built don't get the extra filterable-vector-search
+                # links. Keyword (exact-match) indexes for the fields
+                # mcp-server's retrieve() can filter on (see libs/retrieval.py).
+                for field_name in ("title", "description", "source_path"):
+                    qdrant.create_payload_index(
+                        collection_name=QDRANT_COLLECTION, field_name=field_name, field_schema=PayloadSchemaType.KEYWORD
+                    )
+                collection_ready = True
 
-        pending_points.extend(points)
-        # Embedding (above) already happened; this chunk count is buffered in
-        # memory, not yet written to Qdrant -- that only happens once
-        # pending_points below reaches UPSERT_BATCH_SIZE, which usually spans
-        # several files (most pages produce far fewer than
-        # UPSERT_BATCH_SIZE chunks each).
-        logger.info(
-            "  %s embedded  %3d chunks  %s  (buffered %d/%d pending Qdrant write)",
-            progress,
-            len(points),
-            rel_path,
-            len(pending_points),
-            UPSERT_BATCH_SIZE,
-        )
-        while len(pending_points) >= UPSERT_BATCH_SIZE:
-            batch, pending_points = pending_points[:UPSERT_BATCH_SIZE], pending_points[UPSERT_BATCH_SIZE:]
-            qdrant.upsert(collection_name=QDRANT_COLLECTION, points=batch)
-            total_upserted += len(batch)
-            logger.info("  >>> upserted %d chunks to Qdrant (%d total so far)", len(batch), total_upserted)
+            pending_points.extend(points)
+            # Embedding (above) already happened; this chunk count is buffered in
+            # memory, not yet written to Qdrant -- that only happens once
+            # pending_points below reaches UPSERT_BATCH_SIZE, which usually spans
+            # several files (most pages produce far fewer than
+            # UPSERT_BATCH_SIZE chunks each).
+            logger.info(
+                "  %s embedded  %3d chunks  %s  (buffered %d/%d pending Qdrant write)",
+                progress,
+                len(points),
+                rel_path,
+                len(pending_points),
+                UPSERT_BATCH_SIZE,
+            )
+            while len(pending_points) >= UPSERT_BATCH_SIZE:
+                batch, pending_points = pending_points[:UPSERT_BATCH_SIZE], pending_points[UPSERT_BATCH_SIZE:]
+                with tracer.start_as_current_span("upsert_batch") as batch_span:
+                    batch_span.set_attribute("ingest.batch_size", len(batch))
+                    qdrant.upsert(collection_name=QDRANT_COLLECTION, points=batch)
+                total_upserted += len(batch)
+                logger.info("  >>> upserted %d chunks to Qdrant (%d total so far)", len(batch), total_upserted)
 
-        save_manifest(MANIFEST_PATH, manifest)
+            save_manifest(MANIFEST_PATH, manifest)
 
     ollama_client.close()
 
     if pending_points:
         remaining = len(pending_points)
-        qdrant.upsert(collection_name=QDRANT_COLLECTION, points=pending_points)
+        with tracer.start_as_current_span("upsert_batch") as batch_span:
+            batch_span.set_attribute("ingest.batch_size", remaining)
+            qdrant.upsert(collection_name=QDRANT_COLLECTION, points=pending_points)
         total_upserted += remaining
         logger.info("  >>> upserted final %d chunks to Qdrant (%d total so far)", remaining, total_upserted)
     elif force and not collection_ready:
@@ -685,6 +707,8 @@ def _run() -> int:
 
     save_manifest(MANIFEST_PATH, manifest)
 
+    run_span.set_attribute("ingest.files_with_content", files_with_content)
+    run_span.set_attribute("ingest.total_chunks", total_chunks)
     logger.info(
         "%d pages changed+ingested, %d changed pages now empty, %d removed, %d chunks embedded this run",
         files_with_content,
