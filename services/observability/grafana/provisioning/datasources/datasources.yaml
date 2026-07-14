@@ -1,0 +1,35 @@
+apiVersion: 1
+
+datasources:
+  # Live dashboards: process/container/host cpu-mem-net, and (once
+  # instrumented) app-level gauges like tokens/sec and active_requests.
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+
+  # Historical drill-down: full traces (per-step spans/timings) across
+  # mcp-server/reranker/ingest. Wired to jump straight to the matching Loki
+  # logs (retrieved chunks, generated answer) by trace_id.
+  - name: Tempo
+    uid: tempo
+    type: tempo
+    access: proxy
+    url: http://tempo:3200
+    jsonData:
+      tracesToLogsV2:
+        datasourceUid: loki
+        filterByTraceID: true
+        spanStartTimeShift: "-1m"
+        spanEndTimeShift: "1m"
+      serviceMap:
+        datasourceUid: prometheus
+
+  # Retrieved-chunk/answer payloads and error logs, correlated by trace_id.
+  - name: Loki
+    uid: loki
+    type: loki
+    access: proxy
+    url: http://loki:3100

@@ -11,6 +11,12 @@ x-open-webui-port: &open-webui-port "${OPEN_WEBUI_PORT:-3000}:8080"
 x-mcp-server-published-port: &mcp-server-published-port "${MCP_SERVER_PORT:-8000}"
 x-reranker-published-port: &reranker-published-port "${RERANKER_PORT_HOST:-50051}"
 x-pipelines-port: &pipelines-port "${PIPELINES_PORT:-9099}:9099"
+x-tempo-port: &tempo-port "${TEMPO_PORT:-3200}:3200"
+x-loki-port: &loki-port "${LOKI_PORT:-3100}:3100"
+x-prometheus-port: &prometheus-port "${PROMETHEUS_PORT:-9090}:9090"
+x-cadvisor-port: &cadvisor-port "${CADVISOR_PORT:-8085}:8080"
+x-node-exporter-port: &node-exporter-port "${NODE_EXPORTER_PORT:-9101}:9100"
+x-grafana-port: &grafana-port "${GRAFANA_PORT:-3001}:3000"
 
 # mcp-server's own bind address/port *inside* its container -- this is not
 # the host-exposed port above (that's how it's reached from outside Docker;
@@ -45,18 +51,37 @@ x-reranker-url: &reranker-url "http://reranker:50051"
 x-mcp-url: &mcp-url "http://mcp-server:8000/mcp"
 x-pipelines-url: &pipelines-url "http://pipelines:9099"
 
+# otel-collector's OTLP gRPC endpoint -- best-effort, not a hard dependency:
+# ingest/mcp-server/reranker still start fine (see _common/tracing.py) when
+# the monitoring profile is down, they just have nowhere to export spans.
+x-otel-endpoint: &otel-endpoint "http://otel-collector:4317"
+
 # Required, no default -- fails fast with a clear message if unset, instead
 # of silently ingesting into/serving from the wrong collection or model.
 x-qdrant-collection: &qdrant-collection ${QDRANT_COLLECTION:?set QDRANT_COLLECTION, e.g. in a .env file next to docker-compose.yml}
 x-model-embed: &model-embed ${MODEL_EMBED:?set MODEL_EMBED, e.g. in a .env file next to docker-compose.yml}
-x-model-instruct-internal: &model-instruct-internal ${MODEL_INSTRUCT_INTERNAL:?set MODEL_INSTRUCT_INTERNAL, e.g. in a .env file next to docker-compose.yml}
 
-# Generation model for mcp-server's "anthropic" backend.type -- unlike
-# MODEL_INSTRUCT_INTERNAL above, optional (empty default): only required
-# when backend.type is actually "anthropic" (see
-# services/mcp_server/src/server.py, which fails fast itself if it's unset
-# in that case).
+# Local reasoning model pulled into Ollama -- optional (empty default),
+# unlike MODEL_EMBED/QDRANT_COLLECTION above: only required when
+# mcp-server's config.yml has backend.type: "ollama" (see
+# services/mcp_server/src/server.py, which fails fast itself in that case).
+# A backend.type of anthropic_token/anthropic_subscription needs no local
+# reasoning model at all -- services/ollama-pull/entrypoint.sh skips
+# pulling/warming it instead of failing when this is unset.
+x-model-instruct-internal: &model-instruct-internal "${MODEL_INSTRUCT_INTERNAL:-}"
+
+# Generation model for mcp-server's search_tools.backend anthropic_token/
+# anthropic_subscription variants -- unlike MODEL_EMBED above, optional
+# (empty default): only required when search_tools.backend.type actually
+# selects it (see services/mcp_server/src/server.py, which fails fast
+# itself if it's unset in that case).
 x-model-instruct-external: &model-instruct-external "${MODEL_INSTRUCT_EXTERNAL:-}"
+
+# Claude model for the standalone anthropic_chat tool -- independent of
+# MODEL_INSTRUCT_EXTERNAL above (search_tools.backend and anthropic_chat can
+# point at different Claude models). Optional (empty default): only
+# required when config.yml's anthropic_chat.enabled is true.
+x-model-chat: &model-chat "${MODEL_CHAT:-}"
 
 # Auth key the pipelines service and Open WebUI's OpenAI-compatible
 # connection to it must agree on -- both read from the same anchor so they
@@ -74,6 +99,9 @@ services:
     image: qdrant/qdrant:latest
     container_name: rag-qdrant
     restart: unless-stopped
+    mem_limit: 768m
+    mem_reservation: 256m
+    cpus: 1.0
     ports:
       - *qdrant-http-port
       - *qdrant-grpc-port
@@ -90,6 +118,15 @@ services:
     image: ollama/ollama:latest
     container_name: rag-ollama
     restart: unless-stopped
+    mem_limit: 7g
+    mem_reservation: 3g
+    cpus: 4.0
+    environment:
+      # "-1": once a model is loaded into memory it stays loaded forever
+      # (never auto-unloaded after Ollama's default 5m idle timeout).
+      # Trades RAM for avoiding the ~1 minute cold-load stall (model file
+      # read + llama-server spin-up) on the first request after idle.
+      OLLAMA_KEEP_ALIVE: "-1"
     ports:
       - *ollama-port
     volumes:
@@ -104,6 +141,8 @@ services:
   ollama-pull:
     image: ollama/ollama:latest
     container_name: rag-ollama-pull
+    mem_limit: 256m
+    cpus: 0.25
     depends_on:
       ollama:
         condition: service_healthy
@@ -111,15 +150,24 @@ services:
       OLLAMA_HOST: "ollama:11434"
       MODEL_INSTRUCT_INTERNAL: *model-instruct-internal
       MODEL_EMBED: *model-embed
-    entrypoint: ["sh", "-c"]
-    command:
-      - "ollama pull \"$$MODEL_INSTRUCT_INTERNAL\" && ollama pull \"$$MODEL_EMBED\""
+    # Script lives in services/ollama-pull/entrypoint.sh (bind-mounted, not
+    # baked into the image) -- pulls, then warms each model into memory (see
+    # OLLAMA_KEEP_ALIVE: "-1" above). Skips MODEL_INSTRUCT_INTERNAL instead
+    # of failing when it's unset (mcp-server on backend.type:
+    # anthropic_token/anthropic_subscription doesn't need a local reasoning
+    # model -- see that script for details).
+    entrypoint: ["/entrypoint.sh"]
+    volumes:
+      - ./services/ollama-pull/entrypoint.sh:/entrypoint.sh:ro
     restart: "no"
 
   open-webui:
     image: ghcr.io/open-webui/open-webui:main
     container_name: rag-open-webui
     restart: unless-stopped
+    mem_limit: 768m
+    mem_reservation: 384m
+    cpus: 0.75
     ports:
       - *open-webui-port
     environment:
@@ -144,7 +192,7 @@ services:
     depends_on:
       ollama:
         condition: service_healthy
-      pipelines:
+      open-webui-pipelines:
         condition: service_healthy
 
   # Open WebUI "Pipelines" runtime: hosts services/open_webui_pipelines/
@@ -153,13 +201,20 @@ services:
   # rag_pipeline.py itself calls mcp-server's answer_question tool directly
   # over MCP (streamable-http) -- no dependency on a chat model's
   # tool-calling.
-  pipelines:
+  open-webui-pipelines:
     build:
       # Own directory as context, not root -- unlike ingest/reranker/
       # mcp-server, this service doesn't use services/_common.
       context: ./services/open_webui_pipelines
     container_name: rag-pipelines
     restart: unless-stopped
+    mem_limit: 384m
+    mem_reservation: 128m
+    # 0.25 wasn't enough: this service reinstalls its requirements.txt
+    # frontmatter packages into a fresh venv on every container start (see
+    # module docstring) before uvicorn is even up -- throttled that hard,
+    # pip resolution alone blew past the healthcheck's retry budget.
+    cpus: 0.75
     ports:
       - *pipelines-port
     environment:
@@ -200,6 +255,7 @@ services:
       MODEL_EMBED: *model-embed
       FORCE_INGEST: *force-ingest
       LOG_LEVEL: *log-level
+      OTEL_EXPORTER_OTLP_ENDPOINT: *otel-endpoint
       # Content/state paths, chunking, and upsert batch size live in
       # ingest/config.yml now, not here -- see that file.
     volumes:
@@ -226,6 +282,9 @@ services:
       dockerfile: services/reranker/Dockerfile
     container_name: rag-reranker
     restart: unless-stopped
+    mem_limit: 1.5g
+    mem_reservation: 512m
+    cpus: 1.5
     # Matches the Dockerfile CMD -- kept explicit here so it's an obvious,
     # easy override point (e.g. append `--reload` for dev without editing
     # the image). Host/port come from the same anchors as `ports.target`
@@ -239,6 +298,7 @@ services:
     environment:
       MODEL_RERANKER: *model-reranker
       LOG_LEVEL: *log-level
+      OTEL_EXPORTER_OTLP_ENDPOINT: *otel-endpoint
     volumes:
       - ./services/reranker/src:/app/src
       - ./services/reranker/config.yml:/app/config.yml
@@ -262,6 +322,9 @@ services:
       dockerfile: services/mcp_server/Dockerfile
     container_name: rag-mcp-server
     restart: unless-stopped
+    mem_limit: 512m
+    mem_reservation: 256m
+    cpus: 0.5
     # Matches the Dockerfile CMD -- kept explicit here so it's an obvious,
     # easy override point (e.g. append `--reload` for dev without editing
     # the image), via `docker compose run --rm --service-ports mcp-server
@@ -280,21 +343,59 @@ services:
       MODEL_EMBED: *model-embed
       MODEL_INSTRUCT_INTERNAL: *model-instruct-internal
       MODEL_INSTRUCT_EXTERNAL: *model-instruct-external
+      MODEL_CHAT: *model-chat
       MCP_HOST: *mcp-host
       MCP_PORT: *mcp-internal-port
       RERANKER_URL: *reranker-url
       LOG_LEVEL: *log-level
-      # Reranker on/off, TOP_K_RETRIEVE/RERANK, backend.type/max_tokens, and
-      # the system prompt live in mcp_server/config.yml now, not here -- see
-      # that file. ANTHROPIC_API_KEY/MODEL_INSTRUCT_EXTERNAL stay as env:
-      # the former is a credential, the latter is only read when config.yml's
-      # backend.type is "anthropic" (same override-before-validate pattern
-      # as the reranker's MODEL_RERANKER, see services/mcp_server/src/server.py).
-      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
+      OTEL_EXPORTER_OTLP_ENDPOINT: *otel-endpoint
+      # Reranker on/off, TOP_K_RETRIEVE/RERANK, backend.type/max_tokens, the
+      # system prompt, and anthropic_chat live in mcp_server/config.yml now
+      # (search_tools/anthropic_chat top-level keys), not here -- see that
+      # file. ANTHROPIC_API_KEY/CLAUDE_CODE_OAUTH_TOKEN/MODEL_INSTRUCT_EXTERNAL/
+      # MODEL_CHAT stay as env: the first two are credentials, the latter two
+      # are only read when actually selected (same override-before-validate
+      # pattern as the reranker's MODEL_RERANKER, see
+      # services/mcp_server/src/server.py).
+      #
+      # ANTHROPIC_API_KEY is only required (and only read by server.py) when
+      # backend.type is "anthropic_token" or anthropic_chat.auth is "token"
+      # -- leave it unset for anthropic_subscription/subscription-only
+      # setups. Deliberately NOT "${ANTHROPIC_API_KEY:-}" (which would set
+      # the container's env var to an empty string when unset on the host)
+      # -- the bare form below makes Compose omit the variable entirely from
+      # the container when it's unset on the host, instead of passing
+      # through an empty string. That distinction matters: the `anthropic`
+      # SDK's own credential resolution treats ANTHROPIC_API_KEY="" as an
+      # explicitly-set (if empty) credential, which would break anything
+      # else in the container relying on default SDK credential resolution
+      # (see libs/anthropic.py's build_client()).
+      ANTHROPIC_API_KEY:
+      # CLAUDE_CODE_OAUTH_TOKEN: a long-lived token from `claude setup-token`
+      # (requires an active Claude subscription) -- picked up automatically
+      # by the `claude` CLI subprocess (src/libs/claude_cli.py) for
+      # backend.type: anthropic_subscription and/or anthropic_chat's
+      # auth: "subscription". Not read by server.py itself (see its
+      # comment); same bare-key omit-if-unset form as ANTHROPIC_API_KEY
+      # above, for the same reason -- and because the CLI's own credential
+      # resolution should see this var entirely absent, not empty, when
+      # unused. See README's "Claude subscription auth" section for setup.
+      CLAUDE_CODE_OAUTH_TOKEN:
     volumes:
       - ./services/mcp_server/src:/app/src
       - ./services/mcp_server/config.yml:/app/config.yml
       - ./services/_common:/app/_common
+    healthcheck:
+      # Raw TCP check, not curl -- curl isn't installed in this image (same
+      # approach as qdrant/reranker's healthchecks above). Only confirms
+      # uvicorn is listening, not that a full MCP handshake succeeds -- this
+      # service's only route is streamable-http's /mcp, which needs the MCP
+      # protocol's own session negotiation rather than a bare GET/HEAD.
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/localhost/8000'"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
     depends_on:
       qdrant:
         condition: service_healthy
@@ -308,6 +409,173 @@ services:
       reranker:
         condition: service_started
 
+  # Observability stack. None of the services above are wired to emit
+  # OTLP yet -- this brings up the storage/collector/dashboard layer only
+  # (Tempo for trace history, Loki for log history -- retrieved chunks/
+  # answers -- Prometheus+Grafana for live cpu/mem/net and, once
+  # instrumented, app-level gauges).
+
+  # Trace store, local filesystem backend (services/observability/tempo.yaml)
+  # -- low trace volume for this stack doesn't need object storage/clustering.
+  tempo:
+    image: grafana/tempo:3.0.2
+    container_name: rag-tempo
+    restart: unless-stopped
+    profiles: ["monitoring"]
+    mem_limit: 384m
+    mem_reservation: 128m
+    cpus: 0.5
+    command: ["-config.file=/etc/tempo.yaml"]
+    volumes:
+      - ./services/observability/tempo.yaml:/etc/tempo.yaml
+      - tempo_data:/var/tempo
+    ports:
+      - *tempo-port
+
+  # Log store (retrieved-chunk/answer payloads, correlated by trace_id),
+  # local filesystem backend (services/observability/loki-config.yaml).
+  loki:
+    image: grafana/loki:3.7.3
+    container_name: rag-loki
+    restart: unless-stopped
+    profiles: ["monitoring"]
+    mem_limit: 384m
+    mem_reservation: 128m
+    cpus: 0.5
+    command: ["-config.file=/etc/loki/loki-config.yaml"]
+    volumes:
+      - ./services/observability/loki-config.yaml:/etc/loki/loki-config.yaml
+      - loki_data:/loki
+    ports:
+      - *loki-port
+
+  # Receives OTLP (grpc :4317, http :4318) from instrumented services --
+  # see services/observability/otel-collector-config.yaml. Traces go to
+  # Tempo, logs go to Loki (native OTLP ingestion); metrics are exposed on
+  # :8889 for Prometheus to scrape.
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.156.0
+    container_name: rag-otel-collector
+    restart: unless-stopped
+    profiles: ["monitoring"]
+    mem_limit: 384m
+    mem_reservation: 128m
+    cpus: 0.5
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    volumes:
+      - ./services/observability/otel-collector-config.yaml:/etc/otelcol-contrib/config.yaml
+    ports:
+      - "4317:4317"
+      - "4318:4318"
+    depends_on:
+      tempo:
+        condition: service_started
+      loki:
+        condition: service_started
+
+  prometheus:
+    image: prom/prometheus:v3.13.1
+    container_name: rag-prometheus
+    restart: unless-stopped
+    profiles: ["monitoring"]
+    mem_limit: 512m
+    mem_reservation: 256m
+    cpus: 0.5
+    # Defaults (config.file/storage.tsdb.path) restated explicitly since
+    # overriding `command:` at all drops the image's own default args --
+    # --web.enable-remote-write-receiver lets Tempo's metrics-generator push
+    # span-metrics/service-graph series here (see tempo.yaml).
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.enable-remote-write-receiver"
+    volumes:
+      - ./services/observability/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    ports:
+      - *prometheus-port
+    depends_on:
+      otel-collector:
+        condition: service_started
+      cadvisor:
+        condition: service_started
+      node-exporter:
+        condition: service_started
+
+  # Per-container CPU/mem/network. On Docker Desktop (macOS), stats come
+  # from the Linux VM cadvisor runs in, not the host OS directly.
+  cadvisor:
+    image: ghcr.io/google/cadvisor:v0.60.5
+    container_name: rag-cadvisor
+    restart: unless-stopped
+    profiles: ["monitoring"]
+    mem_limit: 384m
+    mem_reservation: 128m
+    cpus: 0.25
+    privileged: true
+    # disk/diskIO dropped -- their fsHandler walks (per-container overlayfs
+    # `du`) are the slow part on Docker Desktop/macOS's virtiofs layer and
+    # were driving unbounded memory growth; not needed since the dashboard
+    # only tracks cpu/memory/network. docker_only skips non-docker cgroups
+    # the Docker Desktop VM otherwise also walks.
+    command:
+      - "--docker_only=true"
+      - "--housekeeping_interval=15s"
+      - "--disable_metrics=percpu,sched,process,tcp,udp,disk,diskIO,hugetlb,referenced_memory,cpu_topology,resctrl,cpuset"
+    ports:
+      - *cadvisor-port
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+
+  # Host-level CPU/mem/network/disk.
+  node-exporter:
+    image: prom/node-exporter:v1.12.1
+    container_name: rag-node-exporter
+    restart: unless-stopped
+    profiles: ["monitoring"]
+    mem_limit: 192m
+    mem_reservation: 64m
+    cpus: 0.1
+    ports:
+      - *node-exporter-port
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    command:
+      - "--path.procfs=/host/proc"
+      - "--path.sysfs=/host/sys"
+      - "--path.rootfs=/rootfs"
+      - "--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)"
+
+  grafana:
+    image: grafana/grafana:13.1.0
+    container_name: rag-grafana
+    restart: unless-stopped
+    profiles: ["monitoring"]
+    mem_limit: 512m
+    mem_reservation: 256m
+    cpus: 0.5
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: "Viewer"
+    volumes:
+      - ./services/observability/grafana/provisioning:/etc/grafana/provisioning
+      - ./services/observability/grafana/dashboards:/etc/grafana/dashboards
+      - grafana_data:/var/lib/grafana
+    ports:
+      - *grafana-port
+    depends_on:
+      prometheus:
+        condition: service_started
+      tempo:
+        condition: service_started
+      loki:
+        condition: service_started
+
 volumes:
   qdrant_data:
   ollama_data:
@@ -315,3 +583,7 @@ volumes:
   ingest_state:
   reranker_cache:
   pipelines_cache:
+  tempo_data:
+  loki_data:
+  prometheus_data:
+  grafana_data:

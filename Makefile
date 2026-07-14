@@ -8,7 +8,7 @@ MCP_SERVER_PORT ?= 8000
 RERANKER_PORT_HOST ?= 50051
 PIPELINES_PORT ?= 9099
 
-.PHONY: up up-gpu down restart status ps logs pull-models ingest ingest-force mcp-logs reranker-logs clean
+.PHONY: up up-gpu down restart status ps logs pull-models ingest ingest-force mcp-logs reranker-logs clean monitoring-up monitoring-down monitoring-logs
 
 up:
 	docker compose up -d
@@ -67,3 +67,15 @@ ingest-force:
 
 clean:
 	docker compose down -v
+
+# Tempo + Loki + otel-collector + Prometheus + cAdvisor + node-exporter +
+# Grafana -- profile-gated (profiles: ["monitoring"] in docker-compose.yml)
+# so plain `make up`/`docker compose up` never starts them.
+monitoring-up:
+	docker compose --profile monitoring up -d tempo loki otel-collector prometheus cadvisor node-exporter grafana
+
+monitoring-down:
+	docker compose --profile monitoring stop tempo loki otel-collector prometheus cadvisor node-exporter grafana
+
+monitoring-logs:
+	docker compose --profile monitoring logs -f tempo loki otel-collector prometheus cadvisor node-exporter grafana

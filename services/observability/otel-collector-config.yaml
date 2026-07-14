@@ -1,0 +1,47 @@
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch: {}
+
+exporters:
+  # Pipeline spans -- Tempo accepts OTLP natively, no schema to configure.
+  otlp/tempo:
+    endpoint: tempo:4317
+    tls:
+      insecure: true
+
+  # Retrieved-chunk/answer payloads and error logs -- Loki's native OTLP
+  # log ingestion (no attribute-to-label mapping needed, unlike the legacy
+  # `loki` exporter).
+  otlphttp/loki:
+    endpoint: http://loki:3100/otlp
+
+  # Metrics -- scraped by Prometheus (see prometheus.yml) rather than
+  # pushed, so live gauges (tokens/sec, active_requests, per-step latency)
+  # don't round-trip through a log/trace store for the live dashboard.
+  prometheus:
+    endpoint: 0.0.0.0:8889
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlp/tempo]
+    logs:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlphttp/loki]
+    metrics:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [prometheus]
+  telemetry:
+    logs:
+      level: info
