@@ -168,6 +168,11 @@ services:
     ports:
       - *open-webui-port
     environment:
+      # Ollama itself is still used internally (embeddings, and previously
+      # local generation) -- this only hides its models from Open WebUI's
+      # own model picker, which only ever needs the pipelines-backed RAG
+      # model below.
+      ENABLE_OLLAMA_API: "false"
       OLLAMA_BASE_URL: *ollama-base-url
       # Registers the pipelines service (below) as an OpenAI-compatible
       # connection, so its rag_pipeline.py shows up as its own selectable
