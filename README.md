@@ -14,8 +14,9 @@ Once `make up` has finished and `make status` reports everything healthy:
 | mcp-server | http://localhost:8000/mcp | MCP endpoint (streamable HTTP) |
 | Ollama API | http://localhost:11434 | Raw API (used by Open WebUI/`mcp-server`) |
 | pipelines | http://localhost:9099 | Open WebUI Pipelines runtime (used by Open WebUI) |
+| reranker | http://localhost:50051 | Cross-encoder reranking HTTP API (used by `mcp-server`; not user-facing) |
 
-Ports above are the `.env.example` defaults; if you've overridden `*_PORT` in `.env`, substitute accordingly.
+Ports above are the `.env.example` defaults; if you've overridden `*_PORT` in `.env`, substitute accordingly. The monitoring stack (Tempo/Loki/Prometheus/Grafana/etc.) is off by default and not part of `make up` — see [Observability / monitoring](#observability--monitoring-optional) below for its own service links.
 
 - **[Qdrant](https://qdrant.tech/)** — vector database. Ships with a built-in web dashboard for browsing collections/points, served at `/dashboard` on its own REST port — no separate viewer service needed.
 - **[Ollama](https://ollama.com/)** — runs two local models on CPU:
@@ -24,6 +25,7 @@ Ports above are the `.env.example` defaults; if you've overridden `*_PORT` in `.
 - **[Open WebUI](https://openwebui.com/)** — a simple, ChatGPT-like chat frontend wired to Ollama out of the box, plus the `pipelines` connection below.
 - **`pipelines`** — [Open WebUI Pipelines](https://github.com/open-webui/pipelines) runtime, registered in Open WebUI as an OpenAI-compatible connection. Loads [`services/open_webui_pipelines/rag_pipeline.py`](./services/open_webui_pipelines/rag_pipeline.py), which shows up as its own selectable model, **RAG (UE Docs)**, in Open WebUI's model picker. Selecting it and asking a question calls `mcp-server`'s `answer_question` tool directly over MCP and returns its answer — no chat model or tool-calling involved.
 - **`ingest`** — one-shot job that walks `./content`, chunks/cleans the Hugo markdown, embeds it, and upserts it into Qdrant. See [`services/ingest/`](./services/ingest).
+- **`reranker`** — standalone FastAPI/HTTP service exposing cross-encoder reranking (`POST /rerank`) over the internal Docker network only. Keeps `sentence-transformers`/`torch` out of `mcp-server`'s image and lets the reranker be restarted/rebuilt independently. Model is `MODEL_RERANKER` (pulled from Hugging Face on first request, not baked into the image); `max_length` (token truncation) lives in [`services/reranker/config.yml`](./services/reranker/config.yml). Called only when `mcp-server`'s `search_tools.reranker.enabled` is `true`. See [`services/reranker/`](./services/reranker).
 - **`mcp-server`** — an MCP server exposing retrieval-augmented search/answering (embed query → Qdrant search → cross-encoder rerank → generation) over streamable HTTP, for use as a remote MCP connector from Open WebUI and Claude. Generation backend is Ollama, the Claude API (per-token), or the headless Claude Code CLI billed against a Claude subscription instead of tokens — see [Claude subscription auth](#claude-subscription-auth) below. Also exposes a standalone `anthropic_chat` tool (raw text in, raw Claude reply out, no retrieval) when enabled. See [`services/mcp_server/`](./services/mcp_server).
 
 ## Prerequisites
@@ -41,6 +43,8 @@ make up
 make status
 ```
 
+`.env.example` already ships working defaults for the two settings that have no fallback (`MODEL_EMBED=embeddinggemma:300m`, `QDRANT_COLLECTION=content`) and for `MODEL_RERANKER` — the copy above is enough to get the stack itself running with no further edits. `MODEL_INSTRUCT_INTERNAL`/`MODEL_INSTRUCT_EXTERNAL`/`MODEL_CHAT`/Claude credentials are left blank; whichever ones you need depend on `services/mcp_server/config.yml`'s `search_tools.backend.type` (ships as `anthropic_subscription`, so out of the box you'd still need [Claude subscription auth](#claude-subscription-auth) set up before `answer_question` can generate — `search_documents` and retrieval-only use work with no Claude setup at all). See [Configuration](#configuration) for every combination.
+
 `make status` polls all three services and reports whether they're actually responding, not just "container running." The `ollama-pull` container pulls both configured models automatically on first `make up` — this can take a few minutes depending on model size and your connection. Check progress with:
 
 ```bash
@@ -55,24 +59,32 @@ To inspect what's actually in the vector DB (collections, points, payloads) afte
 
 Infra/credentials/deployment settings live in `.env` (copy it from `.env.example`); pipeline tuning knobs live in each service's own `config.yml` (see below) instead.
 
-| Variable                  | Default                   | Purpose                                                                                                                                       |
-|---------------------------|---------------------------|------------------------------------------------------------------------------------------------------------------------------------------------|
-| `MODEL_INSTRUCT_INTERNAL` | (unset)                   | Instruct model pulled into Ollama; used by `mcp-server` for answer generation when `search_tools.backend.type` is `ollama`. Required in that case (e.g. `llama3.2:3b`), otherwise leave unset -- `services/ollama-pull/entrypoint.sh` skips pulling it instead of failing |
-| `MODEL_EMBED`             | **required, no default**  | Embedding model pulled into Ollama; used by both `ingest` and `mcp-server` so query/document vectors share one space                           |
-| `MODEL_RERANKER`          | `BAAI/bge-reranker-v2-m3` | Cross-encoder model for the `reranker` service, pulled from Hugging Face on first use                                                          |
-| `MODEL_INSTRUCT_EXTERNAL` | (unset)                   | Claude model id for `mcp-server` answer generation when `search_tools.backend.type` is `anthropic_token` or `anthropic_subscription` (e.g. `claude-sonnet-5`); not an Ollama model, so `ollama-pull` doesn't touch it |
-| `MODEL_CHAT`              | (unset)                   | Claude model id for the standalone `anthropic_chat` tool (e.g. `claude-sonnet-5`); required when `config.yml`'s `anthropic_chat.enabled` is true. Independent of `MODEL_INSTRUCT_EXTERNAL` -- the two tools can point at different Claude models |
-| `QDRANT_COLLECTION`       | **required, no default**  | Qdrant collection used by both `ingest` and `mcp-server`                                                                                       |
-| `QDRANT_HTTP_PORT`        | `6333`                    | Qdrant REST API port on the host                                                                                                                |
-| `QDRANT_GRPC_PORT`        | `6334`                    | Qdrant gRPC port on the host                                                                                                                    |
-| `OLLAMA_PORT`             | `11434`                   | Ollama API port on the host                                                                                                                     |
-| `OPEN_WEBUI_PORT`         | `3000`                    | Open WebUI port on the host                                                                                                                     |
-| `MCP_SERVER_PORT`         | `8000`                    | `mcp-server`'s streamable-HTTP port on the host                                                                                                 |
-| `PIPELINES_PORT`          | `9099`                    | `pipelines`'s HTTP port on the host                                                                                                              |
-| `FORCE_INGEST`            | `false`                   | Ingest run mode (see [Ingesting content](#ingesting-content)); a run-mode toggle, not a static setting, so it stays an env var                  |
-| `ANTHROPIC_API_KEY`       | (unset)                   | Required only when `search_tools.backend.type` is `anthropic_token`, or `anthropic_chat.auth` is `token` -- a credential, so it stays out of `config.yml`. Leave **unset** for `anthropic_subscription`/`auth: subscription` (uses `CLAUDE_CODE_OAUTH_TOKEN` below instead) -- see [Claude subscription auth](#claude-subscription-auth) |
-| `CLAUDE_CODE_OAUTH_TOKEN` | (unset)                   | A long-lived token from `claude setup-token`. Required only when `search_tools.backend.type` is `anthropic_subscription`, or `anthropic_chat.auth` is `subscription` -- picked up by the `claude` CLI subprocess itself, not read by `mcp-server` -- see [Claude subscription auth](#claude-subscription-auth) |
-| `LOG_LEVEL`               | `INFO`                    | Log level for `ingest`/`mcp-server`/`reranker` (`services/_common/logging_config.py`); one of Python logging's level names (`DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`)|
+| Variable                  | Default                   | Purpose                                                                                                                                                                                                                                                                                                                                  |
+|---------------------------|---------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `MODEL_EMBED`             | **required, no default**  | Embedding model pulled into Ollama; used by both `ingest` and `mcp-server` so query/document vectors share one space                                                                                                                                                                                                                     |
+| `MODEL_RERANKER`          | `BAAI/bge-reranker-v2-m3` | Cross-encoder model for the `reranker` service, pulled from Hugging Face on first use                                                                                                                                                                                                                                                    |
+| `MODEL_INSTRUCT_INTERNAL` |                           | Instruct model pulled into Ollama; used by `mcp-server` for answer generation when `search_tools.backend.type` is `ollama`. Required in that case (e.g. `llama3.2:3b`), otherwise leave unset -- `services/ollama-pull/entrypoint.sh` skips pulling it instead of failing. Harmless to leave set when switching `backend.type` away from `ollama` -- it's simply unused by any other backend, no need to unset it |
+| `MODEL_INSTRUCT_EXTERNAL` |                           | Claude model id for `mcp-server` answer generation when `search_tools.backend.type` is `anthropic_token` or `anthropic_subscription` (e.g. `claude-sonnet-5`); not an Ollama model, so `ollama-pull` doesn't touch it                                                                                                                    |
+| `MODEL_CHAT`              |                           | Claude model id for the standalone `anthropic_chat` tool (e.g. `claude-sonnet-5`); required when `config.yml`'s `anthropic_chat.enabled` is true. Independent of `MODEL_INSTRUCT_EXTERNAL` -- the two tools can point at different Claude models                                                                                         |
+| `QDRANT_COLLECTION`       | **required, no default**  | Qdrant collection used by both `ingest` and `mcp-server`                                                                                                                                                                                                                                                                                 |
+| `QDRANT_HTTP_PORT`        | `6333`                    | Qdrant REST API port on the host                                                                                                                                                                                                                                                                                                         |
+| `QDRANT_GRPC_PORT`        | `6334`                    | Qdrant gRPC port on the host                                                                                                                                                                                                                                                                                                             |
+| `OLLAMA_PORT`             | `11434`                   | Ollama API port on the host                                                                                                                                                                                                                                                                                                              |
+| `OPEN_WEBUI_PORT`         | `3000`                    | Open WebUI port on the host                                                                                                                                                                                                                                                                                                              |
+| `MCP_SERVER_PORT`         | `8000`                    | `mcp-server`'s streamable-HTTP port on the host                                                                                                                                                                                                                                                                                          |
+| `PIPELINES_PORT`          | `9099`                    | `pipelines`'s HTTP port on the host                                                                                                                                                                                                                                                                                                      |
+| `RERANKER_PORT_HOST`      | `50051`                   | `reranker`'s HTTP port on the host (internal-only in normal use; exposed mainly for debugging with `curl`)                                                                                                                                                                                                                               |
+| `PIPELINES_API_KEY`       | `0p3n-w3bu!`              | Shared auth key `open-webui` and `pipelines` use to talk to each other over the OpenAI-compatible connection. Change it from the upstream default if `pipelines` is ever reachable from outside the Docker network                                                                                                                     |
+| `FORCE_INGEST`            | `false`                   | Ingest run mode (see [Ingesting content](#ingesting-content)); a run-mode toggle, not a static setting, so it stays an env var                                                                                                                                                                                                           |
+| `ANTHROPIC_API_KEY`       |                           | Required only when `search_tools.backend.type` is `anthropic_token`, or `anthropic_chat.auth` is `token` -- a credential, so it stays out of `config.yml`. Leave **unset** for `anthropic_subscription`/`auth: subscription` (uses `CLAUDE_CODE_OAUTH_TOKEN` below instead) -- see [Claude subscription auth](#claude-subscription-auth) |
+| `CLAUDE_CODE_OAUTH_TOKEN` |                           | A long-lived token from `claude setup-token`. Required only when `search_tools.backend.type` is `anthropic_subscription`, or `anthropic_chat.auth` is `subscription` -- picked up by the `claude` CLI subprocess itself, not read by `mcp-server` -- see [Claude subscription auth](#claude-subscription-auth)                           |
+| `LOG_LEVEL`               | `INFO`                    | Log level for `ingest`/`mcp-server`/`reranker` (`services/_common/logging_config.py`); one of Python logging's level names (`DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`)                                                                                                                                                             |
+| `TEMPO_PORT`              | `3200`                    | Tempo's HTTP port on the host (traces) — only relevant with the `monitoring` profile up, see [Observability / monitoring](#observability--monitoring-optional)                                                                                                                                                                          |
+| `LOKI_PORT`               | `3100`                    | Loki's HTTP port on the host (logs) — monitoring profile only                                                                                                                                                                                                                                                                            |
+| `PROMETHEUS_PORT`         | `9090`                    | Prometheus's web UI port on the host — monitoring profile only                                                                                                                                                                                                                                                                           |
+| `CADVISOR_PORT`           | `8085`                    | cAdvisor's web UI port on the host (per-container CPU/mem/network) — monitoring profile only                                                                                                                                                                                                                                             |
+| `NODE_EXPORTER_PORT`      | `9101`                    | node-exporter's metrics port on the host (host-level CPU/mem/network/disk) — monitoring profile only                                                                                                                                                                                                                                     |
+| `GRAFANA_PORT`            | `3001`                    | Grafana's web UI port on the host (dashboards over Tempo/Loki/Prometheus) — monitoring profile only                                                                                                                                                                                                                                       |
 
 `MODEL_EMBED` and `QDRANT_COLLECTION` have no fallback in `docker-compose.yml` (`${VAR:?...}`) — `make up`/`make ingest` fail fast with a clear message if either is unset, rather than silently running against the wrong model/collection. `.env.example` ships working values for both; copy it to `.env` and you're covered. `MODEL_INSTRUCT_INTERNAL` is required only conditionally (see the table above) -- `mcp-server` itself fails fast at startup if it's unset while `search_tools.backend.type: ollama` is selected.
 
@@ -130,16 +142,21 @@ Switching `MODEL_EMBED` requires a full `make ingest-force` — a different mode
 | Target          | Description                                                                 |
 |-----------------|-------------------------------------------------------------------------------|
 | `make up`       | Start the stack in the background                                            |
+| `make up-gpu`   | Start the stack, reserving the host's NVIDIA GPU for `ollama` (Linux + NVIDIA Container Toolkit, or Windows + Docker Desktop/WSL2; not macOS) — see [`docker-compose.gpu.yml`](./docker-compose.gpu.yml) |
 | `make down`     | Stop the stack (containers removed, volumes kept)                            |
 | `make restart`  | `down` followed by `up`                                                      |
 | `make status`   | Show container status plus a health check against each service's HTTP port   |
 | `make ps`       | Alias for `make status`                                                      |
 | `make logs`     | Tail logs from all services                                                  |
 | `make mcp-logs` | Tail logs from `mcp-server` only (useful while it downloads the reranker on first run) |
+| `make reranker-logs` | Tail logs from `reranker` only (useful while it downloads `MODEL_RERANKER` on first request) |
 | `make pull-models` | Re-run model pulling manually (useful after changing `.env` model names)  |
 | `make ingest`   | Run the ingest job once (incremental — only new/changed/removed files)       |
 | `make ingest-force` | Run the ingest job with a full collection rebuild                       |
-| `make clean`    | **Destructive.** Stops the stack and deletes all volumes (Qdrant data, pulled models, Open WebUI accounts/settings, ingest manifest, reranker cache) |
+| `make monitoring-up` | Start the optional observability stack (Tempo/Loki/Prometheus/Grafana/cAdvisor/node-exporter) on top of the running stack — see [Observability / monitoring](#observability--monitoring-optional) |
+| `make monitoring-down` | Stop the observability stack's containers (volumes kept)               |
+| `make monitoring-logs` | Tail logs from the observability stack's containers                    |
+| `make clean`    | **Destructive.** Stops the stack (including monitoring, if it was up) and deletes all volumes (Qdrant data, pulled models, Open WebUI accounts/settings, ingest manifest, reranker cache, and monitoring's own trace/log/metric/dashboard data) |
 
 ## Verifying the stack manually
 
@@ -165,6 +182,28 @@ curl http://localhost:6333/collections/content
 Change detection (incremental mode) is per-file, not per-chunk: each file's SHA-256 (raw bytes) is compared against the hash stored for it in the manifest (`STATE_DIR/manifest.json`). A new file, or one whose hash no longer matches, has all of its existing Qdrant points deleted (matched by the `source_path` payload field) and every one of its chunks re-embedded and re-upserted -- there's no partial/paragraph-level diffing within a file. A file removed from `./content` has its points deleted and its manifest entry dropped. Files that didn't change are skipped entirely -- no delete, no re-embed, no re-upsert.
 
 Progress is logged per file as `[i/N, X%]`, and both the manifest and any already-embedded points are saved incrementally as the run goes (not buffered until the end) -- an interrupted run keeps whatever it completed up to that point instead of losing the whole run.
+
+## Observability / monitoring (optional)
+
+Off by default. `make up`/`docker compose up` never starts these containers -- they're gated behind Compose's `monitoring` profile in `docker-compose.yml`. None of the core services (`ingest`/`mcp-server`/`reranker`) fail or behave differently when the monitoring stack is down; they emit OTLP traces on a best-effort basis and simply have nowhere to send them until `otel-collector` is up.
+
+```bash
+make monitoring-up
+```
+
+| Service | URL | Purpose |
+|---------|-----|---------|
+| Grafana | http://localhost:3001 | Dashboards over the three stores below (anonymous viewer access enabled, no login needed) |
+| Prometheus | http://localhost:9090 | Metrics store/query UI (container stats from cAdvisor, host stats from node-exporter, plus Tempo's span-metrics) |
+| Tempo | http://localhost:3200 | Trace store (queried through Grafana, not usually opened directly) |
+| Loki | http://localhost:3100 | Log store — retrieved-chunk/answer payloads correlated by `trace_id` (queried through Grafana) |
+| cAdvisor | — | Per-container CPU/mem/network exporter, scraped by Prometheus (no useful standalone UI here) |
+| node-exporter | — | Host-level CPU/mem/network/disk exporter, scraped by Prometheus |
+| otel-collector | grpc :4317 / http :4318 | Receives OTLP from instrumented services and fans traces out to Tempo, logs out to Loki, metrics out on :8889 for Prometheus to scrape |
+
+Ports above are the `.env.example` defaults (`TEMPO_PORT`/`LOKI_PORT`/`PROMETHEUS_PORT`/`CADVISOR_PORT`/`NODE_EXPORTER_PORT`/`GRAFANA_PORT`, see [Configuration](#configuration)). Open **http://localhost:3001** and use the pre-provisioned "Host & Containers" dashboard for a starting point; Tempo/Loki are also added as Grafana datasources automatically (`services/observability/grafana/provisioning`), so you can jump from a trace to its correlated logs.
+
+Stop the monitoring stack independently of the core stack with `make monitoring-down` (containers stop, volumes/data kept); it comes back with its history intact via `make monitoring-up`. `make clean` wipes its volumes along with everything else's.
 
 ## Claude Code skills for maintaining Qdrant
 
@@ -195,8 +234,38 @@ If a plugin install doesn't apply automatically in an existing session, open `/p
 
 - `search_documents(query, top_k)` — returns the raw reranked source chunks (title, path, heading, text, scores).
 - `answer_question(query, top_k)` — runs the full pipeline and returns a generated answer with cited sources.
+- `anthropic_chat(prompt, system_prompt?)` — only registered when `services/mcp_server/config.yml`'s `anthropic_chat.enabled` is `true`. A separate, retrieval-free tool: raw text in, raw Claude reply out, no Qdrant/reranker involved. See [`config.yml` files](#configyml-files) above.
 
 Queries can be in Russian or English; `answer_question` replies in whatever language the query was asked in. See [`services/mcp_server/`](./services/mcp_server) for the retrieval/rerank/generation pipeline details.
 
 - **Claude (Console / Desktop / claude.ai):** add it as a remote MCP connector using the URL above (`http://localhost:8000/mcp` if running locally, or a reachable host/port otherwise).
 - **Open WebUI:** add it under Settings → Tools as an MCP tool server using the same URL (from inside the compose network, other containers should reach it at `http://mcp-server:8000/mcp` instead of `localhost`).
+
+## Stopping the stack
+
+| Goal | Command | Effect |
+|------|---------|--------|
+| Stop everything, keep data | `make down` | Stops/removes containers; Qdrant data, pulled Ollama models, Open WebUI accounts, ingest manifest, and reranker cache all survive in their volumes for the next `make up` |
+| Stop everything and start fresh | `make clean` | **Destructive.** `docker compose down -v` — same as above but also deletes every volume (Qdrant data, Ollama models, Open WebUI accounts/settings, ingest manifest, reranker cache, and monitoring's trace/log/metric/dashboard data if that profile was ever started). Next `make up` re-pulls both Ollama models and re-downloads the reranker from scratch |
+| Restart everything | `make restart` | `make down` then `make up` — same data-keeping behavior as `make down` |
+| Stop just the monitoring stack | `make monitoring-down` | Stops Tempo/Loki/Prometheus/Grafana/cAdvisor/node-exporter only; core services (`qdrant`/`ollama`/`open-webui`/`mcp-server`/`reranker`/`pipelines`) keep running |
+| Stop one core service | `docker compose stop <service>` (e.g. `docker compose stop open-webui`) | Stops just that container; others keep running. `mcp-server`/`reranker`/`ingest` all depend on `qdrant`/`ollama` being up, so stopping those two breaks retrieval for the rest |
+| Restart one core service after editing its `config.yml` | `docker compose restart <service>` (e.g. `docker compose restart mcp-server`) | `mcp-server`/`ingest`/`reranker` are bind-mounted (see [`config.yml` files](#configyml-files)), so this is enough to pick up an edit — no rebuild needed for `mcp-server`/`reranker`; `ingest` is one-shot and always rebuilds on its own `make ingest`/`make ingest-force` invocation |
+
+`ingest` never needs "stopping" in the above sense — it's a one-shot job (`profiles: ["ingest"]`, `restart: "no"`) that exits on its own once a run finishes; it isn't part of the always-on stack `make up`/`make down` manage.
+
+## Troubleshooting
+
+- **A service in `make status` shows "NOT RESPONDING" right after `make up`.** Most services take a few seconds to a few minutes to become healthy on first start. Check `docker compose ps` for its actual state and `docker compose logs -f <service>` for what it's doing; re-run `make status` after it settles. See the specific cases below for the slow-first-start services.
+- **Model pulling into Ollama is slow or seems stuck.** The `ollama-pull` one-shot container pulls both `MODEL_EMBED` and `MODEL_INSTRUCT_INTERNAL` (if set) on first `make up`; this can take minutes depending on model size and connection speed. Watch it with `docker compose logs -f ollama-pull`; exit code 0 means success. If it's still missing afterwards, re-run it manually with `make pull-models`.
+- **First `search_documents`/`answer_question` call after a fresh `make up` is slow.** `reranker`'s cross-encoder model (`MODEL_RERANKER`) downloads from Hugging Face on first use, not at build time — needs internet access from inside the container. Watch progress with `make reranker-logs`; subsequent calls reuse the cached weights in the `reranker_cache` volume.
+- **"RAG (UE Docs)" model is missing from Open WebUI's picker.** Two possible causes: (1) `pipelines` installs `rag_pipeline.py`'s `requirements:` frontmatter packages into its own venv on every container start (not baked into the image) — check `docker compose logs pipelines` for install progress or errors; (2) a brand-new Open WebUI account needs to complete first-visit admin signup before any model (Ollama or pipelines) appears in the picker at all.
+- **Open WebUI's `/workspace/models` page is empty even though models are pulled.** Expected — that page only lists model *entries* you've explicitly pinned there. The actual pulled Ollama models (and the pipelines model) show up in the chat page's model dropdown instead.
+- **Chatting against the embedding model in Open WebUI fails with an HTTP 400.** `MODEL_EMBED` is embedding-only and doesn't support Ollama's `/api/chat` endpoint. Always chat against `MODEL_INSTRUCT_INTERNAL` (or a Claude model via `mcp-server`'s tools); reserve `MODEL_EMBED` for embedding calls.
+- **A port is already in use on the host.** Port defaults in `.env.example` are dev-convenience values, not guarantees — if one collides with something else already running on your machine, change the corresponding `*_PORT` variable in `.env` (not the compose file) and `make restart`.
+- **`make up`/`make ingest` fails immediately with a message about `MODEL_EMBED` or `QDRANT_COLLECTION` being unset.** These two have no fallback on purpose (`${VAR:?...}` in `docker-compose.yml`) — copy `.env.example` to `.env` if you haven't, or check you haven't accidentally deleted/commented out one of those two lines.
+- **`mcp-server` fails at startup complaining about a missing model/credential.** Its generation backend is chosen by `services/mcp_server/config.yml`'s `search_tools.backend.type`; each type requires a different env var (`MODEL_INSTRUCT_INTERNAL` for `ollama`; `MODEL_INSTRUCT_EXTERNAL` + `ANTHROPIC_API_KEY` for `anthropic_token`; `MODEL_INSTRUCT_EXTERNAL` + `CLAUDE_CODE_OAUTH_TOKEN` for `anthropic_subscription`) — see [Configuration](#configuration) and [Claude subscription auth](#claude-subscription-auth). `mcp-server` fails fast rather than falling back silently, so the log line at `make mcp-logs` names exactly what's missing.
+- **`mcp-server` logs authentication errors from the subscription backend after it worked before.** `claude setup-token`'s token is long-lived but not eternal — re-run `claude setup-token` and update `CLAUDE_CODE_OAUTH_TOKEN` in `.env`, then `make restart`.
+- **Switched `MODEL_EMBED` and search results look wrong/empty.** Different embedding models produce vectors of different (and non-comparable) dimensions. A model swap always needs a full `make ingest-force`, not just `make ingest` — see [Embedding model](#embedding-model).
+- **Traces/logs aren't showing up in Grafana.** The monitoring stack must be started separately with `make monitoring-up` — it's not part of `make up`. If it's already up, confirm `otel-collector` is healthy (`docker compose ps`) and that the service you're checking actually made a request recently (spans/logs are only emitted per-request, not continuously).
+- **GPU isn't being used by Ollama.** `make up` never reserves a GPU — use `make up-gpu` instead (Linux + NVIDIA Container Toolkit, or Windows + Docker Desktop/WSL2 with the NVIDIA driver on the Windows host). Not supported on macOS at all (no GPU passthrough into Docker containers there). Only `ollama` is GPU-accelerated this way; `reranker` always runs on CPU.
