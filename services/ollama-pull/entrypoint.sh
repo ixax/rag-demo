@@ -20,7 +20,7 @@ if [ -n "${MODEL_INSTRUCT_INTERNAL:-}" ]; then
     # which then keeps it warm from here on.
     ollama run "$MODEL_INSTRUCT_INTERNAL" "hi"
 else
-    echo "ollama-pull: MODEL_INSTRUCT_INTERNAL is unset -- skipping the reasoning-model pull (mcp-server's backend.type is presumably anthropic_token/anthropic_subscription, which doesn't need one)"
+    echo "ollama-pull: MODEL_INSTRUCT_INTERNAL is unset -- skipping the reasoning-model pull"
 fi
 
 ollama pull "$MODEL_EMBED"

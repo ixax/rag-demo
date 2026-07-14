@@ -10,6 +10,7 @@ requirements: mcp==1.28.1, starlette==0.37.2, environs==15.0.1
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Generator, Iterator, List, Union
 
 from environs import Env
@@ -62,14 +63,41 @@ class Pipeline:
             yield f"mcp-server error: {error_text}"
             return
 
-        data = result.structuredContent or {}
+        # FastMCP doesn't populate structuredContent for a bare `-> dict`
+        # return type (no output schema to validate against) -- the actual
+        # payload only ever arrives as a JSON-encoded TextContent block in
+        # result.content, even though a naive `or {}` fallback on
+        # structuredContent silently "succeeds" with an empty dict instead
+        # of erroring, which is what made this so easy to miss.
+        data = json.loads(result.content[0].text) if result.content else {}
         answer = data.get("answer")
         if answer is None:
             yield "No relevant documents were found in the knowledge base for this query."
             return
 
+        parts = [answer]
+
+        reasoning = data.get("reasoning")
+        if reasoning:
+            parts.append(f"Reasoning: {reasoning}")
+
         sources = data.get("sources") or []
         if sources:
-            yield answer + "\n\nSources:\n" + "\n".join(sources)
-        else:
-            yield answer
+            parts.append("Sources:\n" + "\n".join(sources))
+
+        input_tokens = data.get("input_tokens")
+        output_tokens = data.get("output_tokens")
+        if input_tokens is not None and output_tokens is not None:
+            parts.append(f"Tokens: {input_tokens} in / {output_tokens} out")
+
+        trace = data.get("trace") or []
+        if trace:
+            steps = ", ".join(f"{s['step']} {s['duration_ms']}ms" for s in trace)
+            total_ms = sum(s["duration_ms"] for s in trace)
+            parts.append(f"Timings: {steps} (total {total_ms:.0f}ms)")
+
+        trace_id = data.get("trace_id")
+        if trace_id:
+            parts.append(f"Trace ID: {trace_id}")
+
+        yield "\n\n".join(parts)

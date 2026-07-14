@@ -70,11 +70,11 @@
         "spec": {
           "name": "trace_id",
           "current": {
-            "text": "",
-            "value": ""
+            "text": ".*",
+            "value": ".*"
           },
-          "query": "",
-          "label": "Trace ID",
+          "query": ".*",
+          "label": "Trace ID filter",
           "hide": "dontHide",
           "skipUrlSync": false
         }
@@ -761,7 +761,8 @@
                         "limit": 20,
                         "query": "{}",
                         "queryType": "traceql",
-                        "tableType": "traces"
+                        "tableType": "traces",
+                        "spss": 50
                       }
                     },
                     "refId": "A",
@@ -792,9 +793,20 @@
                         "id": "links",
                         "value": [
                           {
-                            "title": "Open in waterfall (Overview tab)",
-                            "url": "/d/host-containers/host-containers?var-trace_id=${__value.raw}",
-                            "targetBlank": false
+                            "title": "Trace: ${__value.raw}",
+                            "internal": {
+                              "query": {
+                                "query": "${__value.raw}",
+                                "queryType": "traceql"
+                              },
+                              "datasourceUid": "tempo",
+                              "datasourceName": "Tempo"
+                            }
+                          },
+                          {
+                            "title": "Open in Logs tab (new tab)",
+                            "url": "/d/host-containers/host-containers?dtab=Logs&var-trace_id=${__value.raw}",
+                            "targetBlank": true
                           }
                         ]
                       }
@@ -1066,8 +1078,8 @@
         "kind": "Panel",
         "spec": {
           "id": 14,
-          "title": "Step durations by session (embed / qdrant / rerank / generate)",
-          "description": "One row per pipeline step per request -- match rows by Trace Service/Trace Name/start time to see which steps belong to the same session. Click into 'Recent traces' above for the full per-session waterfall instead.",
+          "title": "All spans by session (any service)",
+          "description": "Every span across every service (mcp-server, reranker, ...) for recent sessions. 'service.name' column shows which service actually emitted each span (not the trace's root service).",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -1085,9 +1097,10 @@
                       },
                       "spec": {
                         "limit": 50,
-                        "query": "{resource.service.name=\"mcp-server\" && name=~\"embed_query|qdrant_search|rerank|generate\"}",
+                        "query": "{name=~\".+\"} | select(resource.service.name)",
                         "queryType": "traceql",
-                        "tableType": "spans"
+                        "tableType": "spans",
+                        "spss": 50
                       }
                     },
                     "refId": "A",
@@ -1118,9 +1131,25 @@
                         "id": "links",
                         "value": [
                           {
-                            "title": "Open in waterfall (Overview tab)",
-                            "url": "/d/host-containers/host-containers?var-trace_id=${__data.fields.traceIdHidden}",
-                            "targetBlank": false
+                            "title": "Span: ${__value.raw}",
+                            "internal": {
+                              "query": {
+                                "query": "${__data.fields.traceIdHidden}",
+                                "queryType": "traceql"
+                              },
+                              "datasourceUid": "tempo",
+                              "datasourceName": "Tempo",
+                              "panelsState": {
+                                "trace": {
+                                  "spanId": "${__value.raw}"
+                                }
+                              }
+                            }
+                          },
+                          {
+                            "title": "Open in Logs tab (new tab)",
+                            "url": "/d/host-containers/host-containers?dtab=Logs&var-trace_id=${__data.fields.traceIdHidden}",
+                            "targetBlank": true
                           }
                         ]
                       }
@@ -1132,61 +1161,12 @@
           }
         }
       },
-      "panel-15": {
-        "kind": "Panel",
-        "spec": {
-          "id": 15,
-          "title": "Trace waterfall ($trace_id)",
-          "description": "Click a Trace ID in 'Recent traces' or 'Step durations' below to fill this in.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "tempo",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "tempo"
-                      },
-                      "spec": {
-                        "query": "$trace_id",
-                        "queryType": "traceId"
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "traces",
-            "version": "",
-            "spec": {
-              "options": {},
-              "fieldConfig": {
-                "defaults": {},
-                "overrides": []
-              }
-            }
-          }
-        }
-      },
       "panel-16": {
         "kind": "Panel",
         "spec": {
           "id": 16,
-          "title": "Step durations \u2014 search_documents",
-          "description": "Only spans from search_documents calls (embed_query/qdrant_search/rerank -- never generate).",
+          "title": "search_documents calls",
+          "description": "Expand a row to preview its spans; click Trace ID to open in Explore (full waterfall) or Logs.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -1203,10 +1183,11 @@
                         "name": "tempo"
                       },
                       "spec": {
-                        "limit": 50,
-                        "query": "{trace:rootName=\"search_documents\" && name=~\"embed_query|qdrant_search|rerank\"}",
+                        "limit": 20,
+                        "query": "{trace:rootName=\"search_documents\"}",
                         "queryType": "traceql",
-                        "tableType": "spans"
+                        "tableType": "traces",
+                        "spss": 50
                       }
                     },
                     "refId": "A",
@@ -1230,16 +1211,27 @@
                   {
                     "matcher": {
                       "id": "byName",
-                      "options": "spanID"
+                      "options": "traceID"
                     },
                     "properties": [
                       {
                         "id": "links",
                         "value": [
                           {
-                            "title": "Open in waterfall (Overview tab)",
-                            "url": "/d/host-containers/host-containers?var-trace_id=${__data.fields.traceIdHidden}",
-                            "targetBlank": false
+                            "title": "Trace: ${__value.raw}",
+                            "internal": {
+                              "query": {
+                                "query": "${__value.raw}",
+                                "queryType": "traceql"
+                              },
+                              "datasourceUid": "tempo",
+                              "datasourceName": "Tempo"
+                            }
+                          },
+                          {
+                            "title": "Open in Logs tab (new tab)",
+                            "url": "/d/host-containers/host-containers?dtab=Logs&var-trace_id=${__value.raw}",
+                            "targetBlank": true
                           }
                         ]
                       }
@@ -1319,8 +1311,8 @@
         "kind": "Panel",
         "spec": {
           "id": 18,
-          "title": "Step durations \u2014 answer_question",
-          "description": "Only spans from answer_question calls (embed_query/qdrant_search/rerank/generate).",
+          "title": "answer_question calls",
+          "description": "Expand a row to preview its spans; click Trace ID to open in Explore (full waterfall) or Logs.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -1337,10 +1329,11 @@
                         "name": "tempo"
                       },
                       "spec": {
-                        "limit": 50,
-                        "query": "{trace:rootName=\"answer_question\" && name=~\"embed_query|qdrant_search|rerank|generate\"}",
+                        "limit": 20,
+                        "query": "{trace:rootName=\"answer_question\"}",
                         "queryType": "traceql",
-                        "tableType": "spans"
+                        "tableType": "traces",
+                        "spss": 50
                       }
                     },
                     "refId": "A",
@@ -1364,16 +1357,27 @@
                   {
                     "matcher": {
                       "id": "byName",
-                      "options": "spanID"
+                      "options": "traceID"
                     },
                     "properties": [
                       {
                         "id": "links",
                         "value": [
                           {
-                            "title": "Open in waterfall (Overview tab)",
-                            "url": "/d/host-containers/host-containers?var-trace_id=${__data.fields.traceIdHidden}",
-                            "targetBlank": false
+                            "title": "Trace: ${__value.raw}",
+                            "internal": {
+                              "query": {
+                                "query": "${__value.raw}",
+                                "queryType": "traceql"
+                              },
+                              "datasourceUid": "tempo",
+                              "datasourceName": "Tempo"
+                            }
+                          },
+                          {
+                            "title": "Open in Logs tab (new tab)",
+                            "url": "/d/host-containers/host-containers?dtab=Logs&var-trace_id=${__value.raw}",
+                            "targetBlank": true
                           }
                         ]
                       }
@@ -1576,6 +1580,381 @@
             }
           }
         }
+      },
+      "panel-23": {
+        "kind": "Panel",
+        "spec": {
+          "id": 23,
+          "title": "search_documents p95 response time",
+          "description": "",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "Prometheus"
+                      },
+                      "spec": {
+                        "expr": "histogram_quantile(0.95, sum by (le) (rate(traces_spanmetrics_latency_bucket{span_name=\"search_documents\"}[5m])))",
+                        "legendFormat": "p95"
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "timeseries",
+            "version": "",
+            "spec": {
+              "options": {
+                "legend": {
+                  "displayMode": "list",
+                  "placement": "right"
+                },
+                "tooltip": {
+                  "mode": "multi",
+                  "sort": "none"
+                }
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "s",
+                  "custom": {
+                    "lineInterpolation": "smooth",
+                    "spanNulls": true
+                  }
+                },
+                "overrides": []
+              }
+            }
+          }
+        }
+      },
+      "panel-24": {
+        "kind": "Panel",
+        "spec": {
+          "id": 24,
+          "title": "answer_question p95 response time",
+          "description": "",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "Prometheus"
+                      },
+                      "spec": {
+                        "expr": "histogram_quantile(0.95, sum by (le) (rate(traces_spanmetrics_latency_bucket{span_name=\"answer_question\"}[5m])))",
+                        "legendFormat": "p95"
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "timeseries",
+            "version": "",
+            "spec": {
+              "options": {
+                "legend": {
+                  "displayMode": "list",
+                  "placement": "right"
+                },
+                "tooltip": {
+                  "mode": "multi",
+                  "sort": "none"
+                }
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "s",
+                  "custom": {
+                    "lineInterpolation": "smooth",
+                    "spanNulls": true
+                  }
+                },
+                "overrides": []
+              }
+            }
+          }
+        }
+      },
+      "panel-25": {
+        "kind": "Panel",
+        "spec": {
+          "id": 25,
+          "title": "mcp-server logs",
+          "description": "",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "loki",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "loki"
+                      },
+                      "spec": {
+                        "expr": "{service_name=\"mcp-server\"} | trace_id=~\"$trace_id\""
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "logs",
+            "version": "",
+            "spec": {
+              "options": {
+                "showTime": true,
+                "showLabels": false,
+                "wrapLogMessage": true,
+                "prettifyLogMessage": true,
+                "enableLogDetails": true,
+                "sortOrder": "Descending"
+              },
+              "fieldConfig": {
+                "defaults": {},
+                "overrides": []
+              }
+            }
+          }
+        }
+      },
+      "panel-26": {
+        "kind": "Panel",
+        "spec": {
+          "id": 26,
+          "title": "reranker logs",
+          "description": "",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "loki",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "loki"
+                      },
+                      "spec": {
+                        "expr": "{service_name=\"reranker\"} | trace_id=~\"$trace_id\""
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "logs",
+            "version": "",
+            "spec": {
+              "options": {
+                "showTime": true,
+                "showLabels": false,
+                "wrapLogMessage": true,
+                "prettifyLogMessage": true,
+                "enableLogDetails": true,
+                "sortOrder": "Descending"
+              },
+              "fieldConfig": {
+                "defaults": {},
+                "overrides": []
+              }
+            }
+          }
+        }
+      },
+      "panel-27": {
+        "kind": "Panel",
+        "spec": {
+          "id": 27,
+          "title": "ingest logs",
+          "description": "Empty until make ingest/ingest-force runs with the OTel instrumentation in place.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "loki",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "loki"
+                      },
+                      "spec": {
+                        "expr": "{service_name=\"ingest\"}"
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "logs",
+            "version": "",
+            "spec": {
+              "options": {
+                "showTime": true,
+                "showLabels": false,
+                "wrapLogMessage": true,
+                "prettifyLogMessage": true,
+                "enableLogDetails": true,
+                "sortOrder": "Descending"
+              },
+              "fieldConfig": {
+                "defaults": {},
+                "overrides": []
+              }
+            }
+          }
+        }
+      },
+      "panel-28": {
+        "kind": "Panel",
+        "spec": {
+          "id": 28,
+          "title": "anthropic_chat calls",
+          "description": "Expand a row to preview its spans; click Trace ID to open in Explore (full waterfall) or Logs.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "tempo",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "tempo"
+                      },
+                      "spec": {
+                        "limit": 20,
+                        "query": "{trace:rootName=\"anthropic_chat\"}",
+                        "queryType": "traceql",
+                        "tableType": "traces",
+                        "spss": 50
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "table",
+            "version": "",
+            "spec": {
+              "options": {},
+              "fieldConfig": {
+                "defaults": {},
+                "overrides": [
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "traceID"
+                    },
+                    "properties": [
+                      {
+                        "id": "links",
+                        "value": [
+                          {
+                            "title": "Trace: ${__value.raw}",
+                            "internal": {
+                              "query": {
+                                "query": "${__value.raw}",
+                                "queryType": "traceql"
+                              },
+                              "datasourceUid": "tempo",
+                              "datasourceName": "Tempo"
+                            }
+                          },
+                          {
+                            "title": "Open in Logs tab (new tab)",
+                            "url": "/d/host-containers/host-containers?dtab=Logs&var-trace_id=${__value.raw}",
+                            "targetBlank": true
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          }
+        }
       }
     },
     "layout": {
@@ -1747,19 +2126,6 @@
                                   "height": 8,
                                   "element": {
                                     "kind": "ElementReference",
-                                    "name": "panel-15"
-                                  }
-                                }
-                              },
-                              {
-                                "kind": "GridLayoutItem",
-                                "spec": {
-                                  "x": 0,
-                                  "y": 8,
-                                  "width": 24,
-                                  "height": 8,
-                                  "element": {
-                                    "kind": "ElementReference",
                                     "name": "panel-9"
                                   }
                                 }
@@ -1768,7 +2134,7 @@
                                 "kind": "GridLayoutItem",
                                 "spec": {
                                   "x": 0,
-                                  "y": 16,
+                                  "y": 8,
                                   "width": 12,
                                   "height": 8,
                                   "element": {
@@ -1781,7 +2147,7 @@
                                 "kind": "GridLayoutItem",
                                 "spec": {
                                   "x": 12,
-                                  "y": 16,
+                                  "y": 8,
                                   "width": 12,
                                   "height": 8,
                                   "element": {
@@ -1794,7 +2160,7 @@
                                 "kind": "GridLayoutItem",
                                 "spec": {
                                   "x": 0,
-                                  "y": 24,
+                                  "y": 16,
                                   "width": 12,
                                   "height": 8,
                                   "element": {
@@ -1807,7 +2173,7 @@
                                 "kind": "GridLayoutItem",
                                 "spec": {
                                   "x": 12,
-                                  "y": 24,
+                                  "y": 16,
                                   "width": 12,
                                   "height": 8,
                                   "element": {
@@ -1820,7 +2186,7 @@
                                 "kind": "GridLayoutItem",
                                 "spec": {
                                   "x": 0,
-                                  "y": 32,
+                                  "y": 24,
                                   "width": 24,
                                   "height": 8,
                                   "element": {
@@ -1867,6 +2233,19 @@
                                     "name": "panel-17"
                                   }
                                 }
+                              },
+                              {
+                                "kind": "GridLayoutItem",
+                                "spec": {
+                                  "x": 0,
+                                  "y": 16,
+                                  "width": 24,
+                                  "height": 8,
+                                  "element": {
+                                    "kind": "ElementReference",
+                                    "name": "panel-23"
+                                  }
+                                }
                               }
                             ]
                           }
@@ -1906,6 +2285,19 @@
                                     "name": "panel-19"
                                   }
                                 }
+                              },
+                              {
+                                "kind": "GridLayoutItem",
+                                "spec": {
+                                  "x": 0,
+                                  "y": 16,
+                                  "width": 24,
+                                  "height": 8,
+                                  "element": {
+                                    "kind": "ElementReference",
+                                    "name": "panel-24"
+                                  }
+                                }
                               }
                             ]
                           }
@@ -1925,6 +2317,19 @@
                                 "spec": {
                                   "x": 0,
                                   "y": 0,
+                                  "width": 24,
+                                  "height": 8,
+                                  "element": {
+                                    "kind": "ElementReference",
+                                    "name": "panel-28"
+                                  }
+                                }
+                              },
+                              {
+                                "kind": "GridLayoutItem",
+                                "spec": {
+                                  "x": 0,
+                                  "y": 8,
                                   "width": 12,
                                   "height": 8,
                                   "element": {
@@ -1937,7 +2342,7 @@
                                 "kind": "GridLayoutItem",
                                 "spec": {
                                   "x": 12,
-                                  "y": 0,
+                                  "y": 8,
                                   "width": 12,
                                   "height": 8,
                                   "element": {
@@ -1948,6 +2353,58 @@
                               }
                             ]
                           }
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          {
+            "kind": "TabsLayoutTab",
+            "spec": {
+              "title": "Logs",
+              "layout": {
+                "kind": "GridLayout",
+                "spec": {
+                  "items": [
+                    {
+                      "kind": "GridLayoutItem",
+                      "spec": {
+                        "x": 0,
+                        "y": 0,
+                        "width": 24,
+                        "height": 10,
+                        "element": {
+                          "kind": "ElementReference",
+                          "name": "panel-25"
+                        }
+                      }
+                    },
+                    {
+                      "kind": "GridLayoutItem",
+                      "spec": {
+                        "x": 0,
+                        "y": 10,
+                        "width": 24,
+                        "height": 10,
+                        "element": {
+                          "kind": "ElementReference",
+                          "name": "panel-26"
+                        }
+                      }
+                    },
+                    {
+                      "kind": "GridLayoutItem",
+                      "spec": {
+                        "x": 0,
+                        "y": 20,
+                        "width": 24,
+                        "height": 8,
+                        "element": {
+                          "kind": "ElementReference",
+                          "name": "panel-27"
                         }
                       }
                     }

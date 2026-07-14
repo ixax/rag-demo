@@ -3,10 +3,21 @@ max_length/query/documents all come in as arguments."""
 
 from __future__ import annotations
 
+import torch
 from sentence_transformers import CrossEncoder
 
 
-def load_model(model_name: str, max_length: int) -> CrossEncoder:
+def load_model(model_name: str, max_length: int, num_threads: int) -> CrossEncoder:
+    # torch.get_num_threads() defaults to the *host's* CPU count (os.cpu_
+    # count()), not this container's cgroup cpus limit -- left unset, torch
+    # oversubscribes way past the quota docker-compose.yml actually grants
+    # this container, and the resulting thread contention/context-switching
+    # made raising that quota (1.5 -> 3.0 cpus) yield far less rerank
+    # speedup than expected. Both calls must happen before any torch op
+    # runs (interop threading is fixed at first use), so this has to be the
+    # very first thing that touches torch in the process.
+    torch.set_num_threads(num_threads)
+    torch.set_num_interop_threads(num_threads)
     return CrossEncoder(model_name, max_length=max_length)
 
 

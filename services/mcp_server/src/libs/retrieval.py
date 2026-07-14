@@ -49,6 +49,16 @@ def retrieve(
     semantic similarity alone."""
     with timer("embed_query"):
         vector = embed_fn(query)
+    # Full vectors are 300-1024+ floats -- not human-readable and not worth
+    # logging in full. A dimension + short fingerprint (first 4 components)
+    # is enough to confirm embedding actually ran and roughly what it
+    # produced, without dumping an unreadable wall of numbers per request.
+    logger.info(
+        "embed_query query=%r dim=%d fingerprint=%s",
+        query,
+        len(vector),
+        [round(v, 4) for v in vector[:4]],
+    )
 
     conditions: list[FieldCondition] = []
     if title is not None:

@@ -12,6 +12,7 @@ This project runs a local RAG stack (Qdrant + Ollama/Claude + `mcp-server`) over
 - `sources` — list of cited source strings, or `[]`.
 - `context` — the raw chunk dicts (title, source_path, heading, text, scores) the answer was grounded in.
 - `trace` — list of `{"step", "duration_ms"}` for each pipeline stage (embed_query, qdrant_search, rerank, generate).
+- `trace_id` — hex OTel trace ID for this call (find it in Tempo/Loki), or `null` if the monitoring stack isn't up.
 
 `search_documents` returns `{"results": [...chunks...], "trace": [...]}` — no `answer`/`reasoning`, just retrieval.
 
@@ -27,6 +28,7 @@ The user's question is: $ARGUMENTS
    - A short "Reasoning" line: the `reasoning` field verbatim (skip this line if it's `null`).
    - A "Sources" list from `sources` (fall back to `context[].source_path`/`title` if `sources` is empty but `context` isn't).
    - A "Timings" line: each `trace` step and its `duration_ms`, plus the total.
+   - A "Trace ID" line: the `trace_id` field verbatim (skip this line if it's `null`).
 3. If `answer` says the knowledge base doesn't know, relay that plainly — don't try to answer from your own knowledge instead.
 4. Use `mcp__rag__search_documents` only if the user explicitly wants raw source chunks rather than a synthesized answer — present its `results`/`trace` the same way, minus the reasoning/answer/sources fields (there are none).
 5. If the MCP tools aren't in your toolset at all, the `rag` server from `.mcp.json` likely isn't connected this session — tell the user to run `/mcp` and approve it (or check `make status` / `docker compose up -d mcp-server` if the container isn't running).

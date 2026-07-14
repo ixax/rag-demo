@@ -33,6 +33,10 @@ from .libs.model import load_model, score
 
 env = Env()
 MODEL_RERANKER = env.str("MODEL_RERANKER")
+# Must match this container's docker-compose.yml `cpus` limit -- see
+# libs/model.py's load_model() docstring for why an unset torch thread
+# count fights that limit instead of respecting it.
+RERANKER_NUM_THREADS = env.int("RERANKER_NUM_THREADS")
 
 configure_logging()
 logger = get_logger(__name__)
@@ -45,7 +49,7 @@ raw_config.raw["model"] = MODEL_RERANKER
 config = raw_config.validate(RerankerConfig)
 
 logger.info("loading reranker model %s ...", config.model)
-_model = load_model(config.model, config.max_length)
+_model = load_model(config.model, config.max_length, RERANKER_NUM_THREADS)
 logger.info("reranker ready")
 
 app = FastAPI()

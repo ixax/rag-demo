@@ -1,4 +1,4 @@
-# mcp-server runtime configuration -- RAG-pipeline tuning knobs.
+# mcp-server runtime configuration
 #
 # Deployment/infra settings (Qdrant/Ollama URLs, ports, embedding model,
 # Anthropic credentials) stay as environment variables in docker-compose.yml

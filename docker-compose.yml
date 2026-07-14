@@ -49,7 +49,7 @@ x-qdrant-url: &qdrant-url "http://qdrant:6333"
 x-ollama-base-url: &ollama-base-url "http://ollama:11434"
 x-reranker-url: &reranker-url "http://reranker:50051"
 x-mcp-url: &mcp-url "http://mcp-server:8000/mcp"
-x-pipelines-url: &pipelines-url "http://pipelines:9099"
+x-pipelines-url: &pipelines-url "http://open-webui-pipelines:9099"
 
 # otel-collector's OTLP gRPC endpoint -- best-effort, not a hard dependency:
 # ingest/mcp-server/reranker still start fine (see _common/tracing.py) when
@@ -118,9 +118,6 @@ services:
     image: ollama/ollama:latest
     container_name: rag-ollama
     restart: unless-stopped
-    mem_limit: 7g
-    mem_reservation: 3g
-    cpus: 4.0
     environment:
       # "-1": once a model is loaded into memory it stays loaded forever
       # (never auto-unloaded after Ollama's default 5m idle timeout).
@@ -187,6 +184,22 @@ services:
       # instead (admin-panel edits to persistent config then don't stick,
       # by the same mechanism).
       ENABLE_PERSISTENT_CONFIG: "false"
+      # Hides the "Arena Model" entry from the model picker (random-model
+      # A/B comparison feature, meant for multi-user model evaluation) --
+      # this deployment only ever exposes the pipelines-backed RAG model.
+      ENABLE_EVALUATION_ARENA_MODELS: "false"
+      # These background/auxiliary tasks (chat title, tags, follow-up
+      # suggestions, prompt-box autocomplete) default to calling whatever
+      # model is currently selected in chat -- here, that's the RAG pipe,
+      # which sends the meta-prompt through retrieval and predictably finds
+      # no relevant chunks for e.g. "suggest 3 follow-up questions". There's
+      # no other model registered to redirect these to (anthropic_chat is an
+      # MCP-only tool, not a selectable Open WebUI model), so they're
+      # disabled outright instead.
+      ENABLE_TITLE_GENERATION: "false"
+      ENABLE_TAGS_GENERATION: "false"
+      ENABLE_FOLLOW_UP_GENERATION: "false"
+      ENABLE_AUTOCOMPLETE_GENERATION: "false"
     volumes:
       - openwebui_data:/app/backend/data
     depends_on:
@@ -284,7 +297,7 @@ services:
     restart: unless-stopped
     mem_limit: 1.5g
     mem_reservation: 512m
-    cpus: 1.5
+    cpus: 3.0
     # Matches the Dockerfile CMD -- kept explicit here so it's an obvious,
     # easy override point (e.g. append `--reload` for dev without editing
     # the image). Host/port come from the same anchors as `ports.target`
@@ -297,6 +310,11 @@ services:
         protocol: tcp
     environment:
       MODEL_RERANKER: *model-reranker
+      # Must match the `cpus:` limit above -- see
+      # services/reranker/src/libs/model.py's load_model() for why an
+      # unset/mismatched torch thread count fights that limit instead of
+      # respecting it.
+      RERANKER_NUM_THREADS: "3"
       LOG_LEVEL: *log-level
       OTEL_EXPORTER_OTLP_ENDPOINT: *otel-endpoint
     volumes:

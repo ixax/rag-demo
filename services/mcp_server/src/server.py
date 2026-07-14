@@ -262,11 +262,20 @@ def search_documents(
             raise
         span.set_attribute("rag.chunks_returned", len(results))
         logger.info(
-            "search_documents query=%r top_k=%d chunks=%d sources=%s",
+            "search_documents query=%r top_k=%d chunks=%d selected=%s",
             query,
             top_k,
             len(results),
-            [c["source_path"] for c in results],
+            [
+                {
+                    "title": c["title"],
+                    "source_path": c["source_path"],
+                    "heading": c["heading"],
+                    "retrieval_score": c["retrieval_score"],
+                    "rerank_score": c["rerank_score"],
+                }
+                for c in results
+            ],
         )
         _requests_counter.add(1, {"tool": "search_documents", "status": "ok"})
         trace_id = format_trace_id(span.get_span_context().trace_id) if OTEL_EXPORTER_OTLP_ENDPOINT else None
@@ -436,13 +445,33 @@ def answer_question(
         span.set_attribute("rag.input_tokens", result.input_tokens)
         span.set_attribute("rag.output_tokens", result.output_tokens)
         logger.info(
-            "answer_question query=%r model=%s chunks=%d sources=%s input_tokens=%d output_tokens=%d\nanswer=%s",
+            "answer_question query=%r model=%s chunks=%d selected=%s",
             query,
             config.search_tools.backend.model,
             len(chunks),
-            sources,
+            [
+                {
+                    "title": c["title"],
+                    "source_path": c["source_path"],
+                    "heading": c["heading"],
+                    "retrieval_score": c["retrieval_score"],
+                    "rerank_score": c["rerank_score"],
+                }
+                for c in chunks
+            ],
+        )
+        # Raw pre-parse text -- lets you see exactly what the model said
+        # (including whether it followed the Reasoning/Answer/Sources
+        # contract at all) even when parse_structured_answer() falls back
+        # to reasoning=None because the "Answer:" label was missing/malformed.
+        logger.info("answer_question query=%r raw_generation=%s", query, result.text)
+        logger.info(
+            "answer_question query=%r input_tokens=%d output_tokens=%d reasoning=%s sources=%s\nanswer=%s",
+            query,
             result.input_tokens,
             result.output_tokens,
+            reasoning,
+            sources,
             answer,
         )
         _requests_counter.add(1, {"tool": "answer_question", "status": "ok"})
