@@ -363,7 +363,21 @@ def build_chunks(page: Page, clean_text: str, section_title: str | None = None) 
             raw_chunks.append((section.heading, piece))
 
     chunks: list[Chunk] = []
-    for idx, (heading, piece) in enumerate(raw_chunks):
+    idx = 0
+    if description:
+        # A standalone chunk for the page's own description, instead of
+        # gluing it onto every per-heading chunk below like the rest of
+        # this function used to: that made every chunk on the page open
+        # with the same boilerplate sentence, so a query that happens to
+        # match the description (e.g. "how do I install and launch X" when
+        # description is "How to install and launch X") scored every chunk
+        # on the page near-identically instead of discriminating between
+        # them -- see RESULTS.md's 2026-07-14 investigation.
+        breadcrumb = f"{section_title} — {title}" if section_title and section_title != title else str(title)
+        chunks.append(Chunk(text=f"{breadcrumb}\n\n{description}", heading=None, chunk_index=idx))
+        idx += 1
+
+    for heading, piece in raw_chunks:
         breadcrumb = f"{title} > {heading}" if heading else str(title)
         # Pages under a section (e.g. ue/getting-started/installation) often
         # have a generic title ("Installation") that never mentions the
@@ -374,9 +388,9 @@ def build_chunks(page: Page, clean_text: str, section_title: str | None = None) 
         # section's own index page, where section_title == title already.
         if section_title and section_title != title:
             breadcrumb = f"{section_title} — {breadcrumb}"
-        header = breadcrumb if not description else f"{breadcrumb}\n{description}"
-        embed_text = f"{header}\n\n{piece}"
+        embed_text = f"{breadcrumb}\n\n{piece}"
         chunks.append(Chunk(text=embed_text, heading=heading, chunk_index=idx))
+        idx += 1
     return chunks
 
 

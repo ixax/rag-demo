@@ -12,6 +12,7 @@ from pydantic import BaseModel
 
 class RerankerConfig(BaseModel):
     enabled: bool
+    confidence_cutoff: float | None = None
 
 
 class RerankerClient:

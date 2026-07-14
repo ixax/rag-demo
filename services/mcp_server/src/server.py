@@ -157,6 +157,7 @@ def search_documents(
         embed_fn=_embed_fn,
         reranker_enabled=config.reranker.enabled,
         rerank_fn=reranker_client.rerank if reranker_client else None,
+        rerank_confidence_cutoff=config.reranker.confidence_cutoff,
         title=title,
         description=description,
         source_path=source_path,
@@ -220,6 +221,7 @@ def answer_question(
         embed_fn=_embed_fn,
         reranker_enabled=config.reranker.enabled,
         rerank_fn=reranker_client.rerank if reranker_client else None,
+        rerank_confidence_cutoff=config.reranker.confidence_cutoff,
         title=title,
         description=description,
         source_path=source_path,
@@ -243,9 +245,12 @@ def answer_question(
         }
 
     context = "\n\n".join(
-        f"[{i}] {c['title']} ({c['source_path']})\n{c['text']}" for i, c in enumerate(chunks, start=1)
+        config.source_template.format(
+            id=i, title=c["title"], path=c["source_path"], updated=c["updated"] or "unknown", text=c["text"]
+        )
+        for i, c in enumerate(chunks, start=1)
     )
-    user_content = f"Context:\n{context}\n\nQuestion: {query}"
+    user_content = config.user_prompt_template.format(context=context, query=query)
 
     with timer("generate"):
         match config.backend.type:

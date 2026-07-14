@@ -33,6 +33,7 @@ def retrieve(
     embed_fn: Callable[[str], list[float]],
     reranker_enabled: bool,
     rerank_fn: Callable[[str, list[str]], list[float]] | None = None,
+    rerank_confidence_cutoff: float | None = None,
     title: str | None = None,
     description: str | None = None,
     source_path: str | None = None,
@@ -87,6 +88,16 @@ def retrieve(
             reranked = [(hit, None) for hit in hits[:top_k_rerank]]
         else:
             ranked = sorted(zip(hits, scores), key=lambda pair: pair[1], reverse=True)
+            # Confidence-gated cutoff: if the top hit clears
+            # rerank_confidence_cutoff, drop everything below it -- a
+            # confidently-relevant match exists, so weaker ones are noise
+            # (this is what let e.g. an unrelated "Commit" chunk sit at
+            # rerank_score 0.85 next to the actually-relevant "Launch" chunk
+            # at 0.98 and still get fed to the generator as if comparably
+            # relevant). Skipped when the top score itself doesn't clear the
+            # cutoff -- a mediocre top match shouldn't be reduced to nothing.
+            if ranked and rerank_confidence_cutoff is not None and ranked[0][1] >= rerank_confidence_cutoff:
+                ranked = [pair for pair in ranked if pair[1] >= rerank_confidence_cutoff]
             reranked = list(ranked[:top_k_rerank])
     else:
         reranked = [(hit, None) for hit in hits[:top_k_rerank]]
@@ -100,6 +111,7 @@ def retrieve(
                 "description": payload.get("description"),
                 "source_path": payload.get("source_path"),
                 "heading": payload.get("heading"),
+                "updated": payload.get("lastmod"),
                 "text": payload.get("text"),
                 "retrieval_score": float(hit.score),
                 "rerank_score": float(rerank_score) if rerank_score is not None else None,

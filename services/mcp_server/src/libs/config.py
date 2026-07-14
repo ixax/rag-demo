@@ -44,6 +44,8 @@ class MCPServerConfig(BaseModel):
     retrieval: RetrievalConfig
     backend: BackendConfig
     system_prompt: str
+    source_template: str
+    user_prompt_template: str
     ollama_timeout: float = Field(gt=0)
     generate_timeout: float = Field(gt=0)
 
@@ -58,29 +60,41 @@ def load_config(path: Path) -> RawConfig:
 #
 # Lives here, not in a generation-specific module, because the shape it
 # parses is entirely defined by (and only meaningful together with)
-# MCPServerConfig.system_prompt's Reasoning/Answer/Sources instructions --
-# both libs/ollama.py and libs/anthropic.py are unaware of this format.
+# MCPServerConfig.system_prompt's Reasoning/Answer/Sources label
+# instructions -- both libs/ollama.py and libs/anthropic.py are unaware of
+# this format.
+#
+# Each label is searched for independently (not one anchored match() over
+# the whole reply) so a model that prepends chatter before the first
+# label, or drops one label but not the others, still yields a partial
+# parse instead of falling all the way back to reasoning=None. Only a
+# missing "Answer:" label -- the one required section -- triggers that
+# fallback.
 
-_ANSWER_SECTIONS_RE = re.compile(
-    r"Reasoning:\s*(?P<reasoning>.*?)\s*"
-    r"Answer:\s*(?P<answer>.*?)\s*"
-    r"(?:Sources:\s*(?P<sources>.*))?$",
-    re.DOTALL,
-)
+_REASONING_RE = re.compile(r"Reasoning:\s*(.*?)(?=\n\s*Answer:|\Z)", re.DOTALL | re.IGNORECASE)
+_ANSWER_RE = re.compile(r"Answer:\s*(.*?)(?=\n\s*Sources:|\Z)", re.DOTALL | re.IGNORECASE)
+_SOURCES_RE = re.compile(r"Sources:\s*(.*)\Z", re.DOTALL | re.IGNORECASE)
 
 
 def parse_structured_answer(raw: str) -> tuple[str | None, str, list[str]]:
     """Split a generation backend's raw reply into (reasoning, answer,
-    sources), per the Reasoning/Answer/Sources format config.yml's
+    sources), per the Reasoning/Answer/Sources labels config.yml's
     system_prompt requires. Falls back to (None, raw, []) if the model
-    didn't follow the format -- small instruct models don't always comply."""
-    match = _ANSWER_SECTIONS_RE.match(raw.strip())
-    if not match:
-        return None, raw.strip(), []
-    sources_block = match.group("sources")
+    didn't produce an "Answer:" label at all -- small local models don't
+    always comply."""
+    raw = raw.strip()
+    answer_match = _ANSWER_RE.search(raw)
+    if not answer_match:
+        return None, raw, []
+    reasoning_match = _REASONING_RE.search(raw)
+    sources_match = _SOURCES_RE.search(raw)
     sources = (
-        [line.strip("- ").strip() for line in sources_block.splitlines() if line.strip()]
-        if sources_block
+        [line.strip("- ").strip() for line in sources_match.group(1).splitlines() if line.strip()]
+        if sources_match
         else []
     )
-    return match.group("reasoning").strip(), match.group("answer").strip(), sources
+    return (
+        reasoning_match.group(1).strip() if reasoning_match else None,
+        answer_match.group(1).strip(),
+        sources,
+    )

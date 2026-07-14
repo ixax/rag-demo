@@ -19,7 +19,16 @@ reranker:
   # adjacent-but-wrong chunk above the actual answer (see AGENTS.md's
   # search-quality notes). Good for quick local iteration, or when the
   # reranker service isn't running.
-  enabled: false
+  enabled: true
+  # null | float in (0, 1]. Confidence-gated cutoff applied after reranking,
+  # before top_k_rerank slicing: if the top-scoring chunk's rerank_score is
+  # >= this value, every chunk scoring below it is dropped (a confidently
+  # relevant match exists, so weaker ones are noise, not just "less good").
+  # If the top score itself doesn't clear the cutoff, nothing is dropped --
+  # a mediocre top match still beats returning no context at all. null
+  # disables this (all top_k_rerank chunks are kept regardless of score).
+  # Ignored when enabled is false (no rerank_score to gate on).
+  confidence_cutoff: 0.9
 
 # How many chunks to pull and keep at each retrieval stage.
 retrieval:
@@ -33,7 +42,7 @@ retrieval:
   # vector-retrieved) chunks are kept as final context for generation, or
   # returned by search_documents. This is the default; callers can still
   # override it per-call via the tool's `top_k` argument.
-  top_k_rerank: 10
+  top_k_rerank: 5
 
 # Generation backend for answer_question. search_documents never generates
 # (retrieval-only), so this doesn't affect it.
@@ -62,34 +71,74 @@ backend:
 # System prompt sent to the generation backend (shared by both ollama and
 # anthropic). Must keep the model replying in three labeled sections, in
 # this order, each starting on its own line -- "Reasoning:", "Answer:",
-# "Sources:" -- because answer_question's _parse_structured_answer() parses
-# exactly that shape. If the model doesn't follow it (small local models
-# sometimes don't), the parser falls back to reasoning=null, answer=<raw
-# text>, sources=[] rather than erroring.
+# "Sources:" -- because answer_question's parse_structured_answer()
+# (libs/config.py) parses exactly that shape. If the model doesn't follow
+# it (small local models sometimes don't), the parser falls back to
+# reasoning=null, answer=<raw text>, sources=[] rather than erroring.
 system_prompt: |
-  You are a documentation assistant. Answer the user's question using ONLY
-  the numbered context excerpts below -- never use outside knowledge and
-  never guess. Always reply in the same language the question was asked in
-  (the content may be in a different language than the question --
-  translate as needed).
+  You are a documentation assistant. Answer using ONLY the sources below --
+  never guess or use outside knowledge. Reply in the question's language.
 
-  Structure your response as exactly three labeled sections, in this
-  order, each starting on its own line with the label below:
+  Combine sources that together answer different parts of the SAME
+  question (e.g. an "install" step and a "launch" step). Don't pull in a
+  source just because it shares a page or topic if it doesn't actually
+  help answer what was asked.
 
-  Reasoning: 1-3 sentences judging whether the excerpts actually address
-  the question -- which ones are relevant and why, or why none of them
-  are. If you're not sure the answer is correct, say so here.
+  Reply in exactly three labeled sections, each starting on its own line
+  with the label followed by a colon (not a markdown heading):
 
-  Answer: the answer itself, as plain prose/steps, with NO bracketed
-  markers like [1] or [n] anywhere in it -- do not cite inline. If the
-  excerpts don't support a reliable answer, write here (in the question's
-  language) that the knowledge base doesn't contain one, and briefly say
-  what the excerpts do cover instead, if anything. A clear 'I don't know'
-  is always better than a plausible-sounding guess.
+  Reasoning: 1-2 sentences on which sources are relevant and why.
 
-  Sources: one source per line, formatted as '[n] title (path)', covering
-  only the excerpts you actually used in Answer. Omit this section
-  entirely when Answer says you don't know.
+  Answer: plain prose or steps, no [n] markers. Only facts literally in the
+  sources.
+
+  Sources: one per line, '[id] title (path)', only those used in Answer.
+
+  Example -- sources answer the question:
+  Reasoning: Source 1 gives the file path.
+  Answer: Launch it from `\win64\unifiededitor.exe`.
+  Sources: [1] Installation (ue/install/index.md)
+
+  Example -- sources don't answer the question:
+  Reasoning: None of the sources cover this.
+  Answer: Not enough data in the sources to answer this.
+  Sources:
+
+  Before you answer, check: can you cite a source id for every fact? If
+  not, cut it -- it's a guess, not grounding. Grounding beats completeness:
+  a short, fully-cited answer beats a longer one with unsupported claims.
+
+# Per-chunk template used to render each retrieved chunk into the context
+# block sent to the generation backend (answer_question only --
+# search_documents never generates). Python str.format() placeholders:
+# {id} (1-based position among the retrieved chunks), {title}, {path}
+# (source_path), {updated} (payload's lastmod, or "unknown" if it has
+# none), {text} (the chunk body). Values are substituted verbatim -- a
+# chunk's own text may contain literal "{"/"}" (e.g. heading anchors like
+# "{#launch-ue}") without breaking the template, since str.format() doesn't
+# re-scan substituted values for further placeholders. Only the template
+# string itself must stick to the five placeholders above.
+source_template: |
+  <source id="{id}" title="{title}" path="{path}" updated="{updated}">
+  {text}
+  </source>
+
+# Whole-prompt template assembled from source_template's joined output
+# ({context}) and the raw user query ({query}) -- this, not server.py, owns
+# the entire literal wording of the user turn, including the "Question:"
+# label and the closing instruction. The closing instruction repeats the
+# key formatting/grounding requirement right next to the question (not just
+# in system_prompt) as insurance against the model losing it over a long
+# context of sources.
+user_prompt_template: |
+  {context}
+
+  Question: {query}
+
+  Answer using only the sources above, in Reasoning/Answer/Sources format.
+  Combine sources that cover different parts of this question, but don't
+  pull in one that doesn't actually help. If the data isn't sufficient,
+  say so in Answer -- don't invent one.
 
 # Request timeout (seconds) for calls to Ollama's /api/embeddings (query
 # embedding). Number > 0. Does not apply to generation.
