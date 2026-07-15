@@ -16,19 +16,36 @@ import httpx
 from .generation import GenerationResult
 
 
-def generate(client: httpx.Client, model: str, system_prompt: str, user_content: str, timeout: float) -> GenerationResult:
-    resp = client.post(
-        "/api/chat",
-        json={
-            "model": model,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_content},
-            ],
-            "stream": False,
-        },
-        timeout=timeout,
-    )
+def generate(
+    client: httpx.Client,
+    model: str,
+    system_prompt: str,
+    user_content: str,
+    timeout: float,
+    options: dict[str, float] | None = None,
+    response_schema: dict | None = None,
+) -> GenerationResult:
+    body: dict = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_content},
+        ],
+        "stream": False,
+    }
+    # Both optional/omitted by default so callers that don't pass them (or a
+    # generation_profiles entry without options/response_schema set) get
+    # Ollama's own defaults rather than this function injecting empty
+    # values. options -> sampler params (e.g. temperature, min_p).
+    # response_schema -> Ollama's structured-outputs "format" field, which
+    # constrains sampling to that JSON shape at the grammar level -- see
+    # config.yml's generation_profiles.local for why this profile uses it
+    # instead of a textual "reply in this format" instruction.
+    if options is not None:
+        body["options"] = options
+    if response_schema is not None:
+        body["format"] = response_schema
+    resp = client.post("/api/chat", json=body, timeout=timeout)
     resp.raise_for_status()
     # input_tokens/output_tokens zeroed rather than read from
     # prompt_eval_count/eval_count -- token accounting for this backend

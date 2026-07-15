@@ -10,7 +10,7 @@ Current state: infra skeleton, ingestion pipeline, and a query-time MCP server a
 
 - `qdrant` — vector DB, ports 6333 (REST) / 6334 (gRPC).
 - `ollama` — runs two CPU-sized local models (configurable via `.env`):
-  - `MODEL_INSTRUCT_INTERNAL` (no default, e.g. `llama3.2:3b`) — chat/generation when `mcp-server`'s `search_tools.backend.type` is `ollama`. Required in that case; unset it entirely for `anthropic_token`/`anthropic_subscription`/`""` search_tools.backend.type, since none of those need a local reasoning model.
+  - `MODEL_INSTRUCT_INTERNAL` (no default, e.g. `gemma3:4b`) — chat/generation when `mcp-server`'s `search_tools.backend.type` is `ollama`. Required in that case; unset it entirely for `anthropic_token`/`anthropic_subscription`/`""` search_tools.backend.type, since none of those need a local reasoning model. Uses `search_tools.generation_profiles.local` (`config.yml`) for its prompt/sampler options/response schema — see that key's comments.
   - `MODEL_EMBED` (default `embeddinggemma:300m`) — embedding, used by both `ingest` and `mcp-server` (same model both sides so query/document vectors are comparable). See README's "Embedding model" section for benchmarked alternatives.
 - `ollama-pull` — one-shot init container that pulls both models on `make up`, then exits (exit code 0 is success, not a failure). Entrypoint script lives in [`services/ollama-pull/entrypoint.sh`](./services/ollama-pull/entrypoint.sh) (bind-mounted, not inline `command:` in `docker-compose.yml`) -- skips the `MODEL_INSTRUCT_INTERNAL` pull instead of failing when it's unset.
 - `open-webui` — chat frontend at `http://localhost:${OPEN_WEBUI_PORT}` (default 3000), wired to Ollama via `OLLAMA_BASE_URL` and to `pipelines` via `OPENAI_API_BASE_URLS`/`OPENAI_API_KEYS`.

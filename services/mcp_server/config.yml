@@ -91,31 +91,118 @@ search_tools:
     # anthropic_subscription -- see above). Integer > 0.
     max_tokens: 1024
 
-  # System prompt sent to the generation backend (shared by ollama and both
-  # anthropic_* variants). Must keep the model replying in three labeled sections, in
-  # this order, each starting on its own line -- "Reasoning:", "Answer:",
-  # "Sources:" -- because answer_question's parse_structured_answer()
-  # (libs/config.py) parses exactly that shape. If the model doesn't follow
-  # it (small local models sometimes don't), the parser falls back to
-  # reasoning=null, answer=<raw text>, sources=[] rather than erroring.
-  system_prompt: |
-    You are a documentation assistant. Answer using ONLY the sources below --
-    never guess or use outside knowledge. Reply in the question's language.
+  # Generation prompts/params, keyed by model family rather than one prompt
+  # shared across every backend. Two keys:
+  #   agentic: anthropic_token / anthropic_subscription (Claude/Codex-class
+  #            models) -- long-form textual contract, since these models
+  #            reliably follow it.
+  #   local:   ollama (open-weight models run locally -- e.g. gemma3:4b,
+  #            llama3.2:3b, qwen3). Short, literal instructions plus
+  #            JSON-schema-constrained output (response_schema below, sent
+  #            as Ollama's `format` field) instead of a textual "reply in
+  #            this shape" instruction -- small local models don't reliably
+  #            follow textual format instructions, but schema-constrained
+  #            sampling enforces the shape regardless of the model's chat
+  #            template (e.g. Gemma has no native system role; a template
+  #            mismatch degrades quality silently rather than erroring, so
+  #            the contract shouldn't depend on how the template handles
+  #            system messages).
+  generation_profiles:
+    agentic:
+      # Must keep the model replying in three labeled sections, in this
+      # order, each starting on its own line -- "Reasoning:", "Answer:",
+      # "Sources:" -- because answer_question's parse_structured_answer()
+      # (libs/config.py) parses exactly that shape.
+      system_prompt: |
+        You are a documentation assistant. Answer using ONLY the sources below --
+        never guess or use outside knowledge. Reply in the question's language.
 
-    Combine sources that together answer different parts of the SAME
-    question (e.g. an "install" step and a "launch" step). Don't pull in a
-    source just because it shares a page or topic if it doesn't actually
-    help answer what was asked.
+        Combine sources that together answer different parts of the SAME
+        question (e.g. an "install" step and a "launch" step). Don't pull in a
+        source just because it shares a page or topic if it doesn't actually
+        help answer what was asked.
 
-    Reply in exactly three labeled sections, each starting on its own line
-    with the label followed by a colon (not a markdown heading):
+        Reply in exactly three labeled sections, each starting on its own line
+        with the label followed by a colon (not a markdown heading):
 
-    Reasoning: 1-2 sentences on which sources are relevant and why.
+        Reasoning: 1-2 sentences on which sources are relevant and why.
 
-    Answer: plain prose or steps, no [n] markers. Only facts literally in the
-    sources. If they don't support a reliable answer, say so directly.
+        Answer: plain prose or steps, no [n] markers. Only facts literally in the
+        sources. If they don't support a reliable answer, say so directly.
 
-    Sources: one per line, '[id] title (path)', only those used in Answer.
+        Sources: one per line, '[id] title (path)', only those used in Answer.
+
+      # {context}/{query} placeholders, same contract as local's below --
+      # see user_prompt_template docs further down for the full placeholder
+      # list (this key only differs in wording, not mechanics).
+      user_prompt_template: |
+        {context}
+
+        Question: {query}
+
+        Answer using only the sources above, in Reasoning/Answer/Sources format.
+        Combine sources that cover different parts of this question, but don't
+        pull in one that doesn't actually help. If the data isn't sufficient,
+        say so in Answer -- don't invent one.
+
+    local:
+      # Short and literal on purpose -- see the generation_profiles comment
+      # above. The three-key shape below is enforced by response_schema,
+      # not by this text; this text only needs to carry semantic intent
+      # (what each field means), not the JSON mechanics.
+      # sources asks for bare ids, not a formatted citation string --
+      # golden-eval showed gemma3:4b can pick correct ids reliably but can't
+      # reliably compose "[id] title (path)" itself (produced malformed
+      # output composing that string). server.py formats the citation from
+      # `chunks` using the ids this returns, instead of asking the model to
+      # produce that string. reasoning is required (was optional before --
+      # golden-eval showed the model skips it entirely once it's optional,
+      # even though the old free-text prompt without a schema always filled
+      # it in reliably).
+      system_prompt: |
+        Answer using ONLY the sources. Never guess or use outside knowledge.
+        Reply in the question's language.
+
+        Output JSON with exactly these keys:
+        reasoning: 1-2 sentences on which sources you used and why.
+        answer: plain prose or steps, no [n] markers. Only facts literally in
+          the sources. If they don't support a reliable answer, say so here.
+        sources: array of the integer ids (the source id="N" attribute) of
+          sources actually used in answer.
+
+      user_prompt_template: |
+        {context}
+
+        Question: {query}
+
+      # Sampler options passed through to Ollama's /api/chat as "options".
+      # temperature 0-0.3 + min_p (not top_p) is the recommended combo for
+      # local models on extraction/classification-shaped tasks, which is
+      # what answer_question is -- see libs/ollama.py's generate().
+      options:
+        temperature: 0.2
+        min_p: 0.05
+
+      # JSON Schema sent as Ollama's "format" field -- constrains sampling
+      # to this shape (grammar-level, not a textual instruction). Mirrors
+      # the reasoning/answer/sources fields the system_prompt above
+      # describes. additionalProperties: false keeps the constrained
+      # grammar smaller and rules out extra keys. All three keys required
+      # (not just answer/sources) -- see the comment above this block for
+      # why reasoning needs to be required, not just documented.
+      response_schema:
+        type: object
+        properties:
+          reasoning:
+            type: string
+          answer:
+            type: string
+          sources:
+            type: array
+            items:
+              type: integer
+        required: ["reasoning", "answer", "sources"]
+        additionalProperties: false
 
   # Per-chunk template used to render each retrieved chunk into the context
   # block sent to the generation backend (answer_question only --
@@ -131,23 +218,6 @@ search_tools:
     <source id="{id}" title="{title}" path="{path}" updated="{updated}">
     {text}
     </source>
-
-  # Whole-prompt template assembled from source_template's joined output
-  # ({context}) and the raw user query ({query}) -- this, not server.py, owns
-  # the entire literal wording of the user turn, including the "Question:"
-  # label and the closing instruction. The closing instruction repeats the
-  # key formatting/grounding requirement right next to the question (not just
-  # in system_prompt) as insurance against the model losing it over a long
-  # context of sources.
-  user_prompt_template: |
-    {context}
-
-    Question: {query}
-
-    Answer using only the sources above, in Reasoning/Answer/Sources format.
-    Combine sources that cover different parts of this question, but don't
-    pull in one that doesn't actually help. If the data isn't sufficient,
-    say so in Answer -- don't invent one.
 
   # Request timeout (seconds) for calls to Ollama's /api/embeddings (query
   # embedding). Number > 0. Does not apply to generation.
@@ -192,7 +262,7 @@ anthropic_chat:
   # Integer > 0.
   max_tokens: 4096
   # Optional system prompt for anthropic_chat calls -- unlike
-  # search_tools.system_prompt above, this is NOT the Reasoning/Answer/
+  # search_tools.generation_profiles above, this is NOT the Reasoning/Answer/
   # Sources RAG contract (anthropic_chat has no context to reason over), so
   # leave it empty for a plain assistant, or set your own. Callers can
   # override this per-call via the tool's `system_prompt` argument.

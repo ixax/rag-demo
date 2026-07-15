@@ -40,9 +40,10 @@ share the same build_client()/generate() functions in libs/anthropic.py.
 
 Both search_documents/answer_question return structured JSON rather than
 plain text: the retrieved chunks (the local data the reasoning is grounded in), the reasoning itself
-(`answer_question` only -- see config.yml's search_tools.system_prompt for the Reasoning/
-Answer/Sources format, which every generation backend follows since it's
-shared), and a `trace` of pipeline steps with wall-clock timings. This is
+(`answer_question` only -- see config.yml's search_tools.generation_profiles
+for the Reasoning/Answer/Sources contract each backend family follows --
+textual for anthropic_token/anthropic_subscription, JSON-schema-constrained
+for ollama), and a `trace` of pipeline steps with wall-clock timings. This is
 meant to be consumed by a thin presentation layer (e.g. a Haiku-model agent)
 rather than reasoned about further -- the reasoning already happened here.
 
@@ -72,7 +73,7 @@ from _common.tracing import OTEL_EXPORTER_OTLP_ENDPOINT, configure_tracing, get_
 from .libs import anthropic as anthropic_lib
 from .libs import claude_cli as claude_cli_lib
 from .libs import ollama as ollama_lib
-from .libs.config import MCPServerConfig, load_config, parse_structured_answer
+from .libs.config import MCPServerConfig, load_config, parse_structured_answer, parse_structured_answer_json, profile_for
 from .libs.reranker import RerankerClient
 from .libs.retrieval import retrieve
 from .libs.timer import StepTimer
@@ -302,7 +303,7 @@ def answer_question(
     when you just want the retrieved chunks via this tool's response shape.
 
     The reasoning behind the answer (when generation runs) is already
-    produced by the pipeline (see config.yml's search_tools.system_prompt) -- callers
+    produced by the pipeline (see config.yml's search_tools.generation_profiles) -- callers
     should present `reasoning`/`trace` as-is rather than re-deriving them.
 
     Args:
@@ -394,7 +395,12 @@ def answer_question(
             )
             for i, c in enumerate(chunks, start=1)
         )
-        user_content = config.search_tools.user_prompt_template.format(context=context, query=query)
+        # Which generation_profiles entry (config.yml) this backend.type
+        # uses -- "local" (short prompt + JSON-schema-constrained output)
+        # for ollama, "agentic" (long-form textual contract) for both
+        # anthropic_* variants. See libs/config.py's profile_for().
+        profile = config.search_tools.generation_profiles[profile_for(config.search_tools.backend.type)]
+        user_content = profile.user_prompt_template.format(context=context, query=query)
 
         with timer("generate"):
             match config.search_tools.backend.type:
@@ -412,7 +418,7 @@ def answer_question(
                         anthropic_client,
                         config.search_tools.backend.model,
                         config.search_tools.backend.max_tokens,
-                        config.search_tools.system_prompt,
+                        profile.system_prompt,
                         user_content,
                     )
                 case "anthropic_subscription":
@@ -424,7 +430,7 @@ def answer_question(
                     span.set_attribute("rag.model", config.search_tools.backend.model)
                     result = claude_cli_lib.generate(
                         config.search_tools.backend.model,
-                        config.search_tools.system_prompt,
+                        profile.system_prompt,
                         user_content,
                         config.search_tools.generate_timeout,
                     )
@@ -434,14 +440,39 @@ def answer_question(
                     # injected into backend.model -- guaranteed non-None here.
                     assert config.search_tools.backend.model is not None
                     span.set_attribute("rag.model", config.search_tools.backend.model)
-                    result = ollama_lib.generate(ollama_client, config.search_tools.backend.model, config.search_tools.system_prompt, user_content, config.search_tools.generate_timeout)
+                    result = ollama_lib.generate(
+                        ollama_client,
+                        config.search_tools.backend.model,
+                        profile.system_prompt,
+                        user_content,
+                        config.search_tools.generate_timeout,
+                        options=profile.options,
+                        response_schema=profile.response_schema,
+                    )
                 case _:
                     # Unreachable: config.search_tools.backend.type is a pydantic Literal
                     # ("", "ollama", "anthropic_token", "anthropic_subscription"),
                     # and "" already returned above.
                     raise AssertionError(f"unhandled backend.type: {config.search_tools.backend.type!r}")
 
-        reasoning, answer, sources = parse_structured_answer(result.text)
+        # ollama's reply is JSON (response_schema-constrained, see above);
+        # both anthropic_* variants use the textual Reasoning/Answer/Sources
+        # contract instead -- see libs/config.py's two parsers. The agentic
+        # parser already returns formatted "[id] title (path)" strings
+        # (the model composes them itself); the local/ollama parser returns
+        # bare integer ids instead (see parse_structured_answer_json's
+        # docstring), so those need mapping back to citation strings here
+        # using `chunks`, which the model never sees directly.
+        sources: list[str]
+        if config.search_tools.backend.type == "ollama":
+            reasoning, answer, source_ids = parse_structured_answer_json(result.text)
+            sources = [
+                f'[{sid}] {chunks[sid - 1]["title"]} ({chunks[sid - 1]["source_path"]})'
+                for sid in source_ids
+                if 1 <= sid <= len(chunks)
+            ]
+        else:
+            reasoning, answer, sources = parse_structured_answer(result.text)
         span.set_attribute("rag.input_tokens", result.input_tokens)
         span.set_attribute("rag.output_tokens", result.output_tokens)
         logger.info(

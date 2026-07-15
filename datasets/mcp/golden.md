@@ -1,6 +1,8 @@
 # Golden Dataset (RAG prompt experiments)
 
-Machine-parseable golden Q&A set for `llama3.2:3b` prompt tuning: 5 hand-verified
+Machine-parseable golden Q&A set for local Ollama instruct model prompt tuning
+(`search_tools.generation_profiles.local` in `services/mcp_server/config.yml`):
+5 hand-verified
 questions with known-correct answers and the exact retrieved chunks pinned, so
 prompt-structure changes can be compared without retrieval noise. Parse by
 splitting on `## ` (query blocks) then `### ` (fields within a block).

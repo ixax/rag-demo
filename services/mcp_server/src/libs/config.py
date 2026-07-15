@@ -14,6 +14,7 @@ then calls .validate(MCPServerConfig).
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 from typing import Literal
@@ -85,6 +86,25 @@ class AnthropicChatConfig(BaseModel):
         return self
 
 
+class GenerationProfile(BaseModel):
+    """One entry of search_tools.generation_profiles -- system_prompt +
+    user_prompt_template for a given model family, plus (local/ollama only)
+    sampler options and a JSON schema for constrained output. See
+    config.yml's generation_profiles comment for why agentic (Claude/Codex)
+    and local (Ollama) need different prompts/contracts."""
+
+    system_prompt: str
+    user_prompt_template: str
+    # Ollama /api/chat "options" (e.g. temperature, min_p). None for the
+    # agentic profile -- anthropic_lib/claude_cli_lib don't take options.
+    options: dict[str, float] | None = None
+    # JSON Schema sent as Ollama's "format" field, constraining generation
+    # to that shape. None for the agentic profile, which uses the textual
+    # Reasoning/Answer/Sources contract instead (see parse_structured_answer
+    # below).
+    response_schema: dict | None = None
+
+
 class SearchToolsConfig(BaseModel):
     """Everything behind search_documents/answer_question -- retrieval,
     reranking, RAG-answer generation. Grouped under config.yml's
@@ -94,9 +114,8 @@ class SearchToolsConfig(BaseModel):
     reranker: RerankerConfig
     retrieval: RetrievalConfig
     backend: BackendConfig
-    system_prompt: str
+    generation_profiles: dict[Literal["agentic", "local"], GenerationProfile]
     source_template: str
-    user_prompt_template: str
     ollama_timeout: float = Field(gt=0)
     generate_timeout: float = Field(gt=0)
 
@@ -110,15 +129,25 @@ def load_config(path: Path) -> RawConfig:
     return load_raw_config(path)
 
 
+def profile_for(backend_type: str) -> Literal["agentic", "local"]:
+    """Which search_tools.generation_profiles key a given backend.type uses
+    -- "local" for ollama (open-weight models needing a short prompt +
+    schema-constrained output), "agentic" for both anthropic_* variants
+    (Claude/Codex-class models, textual contract). backend_type "" never
+    reaches this (answer_question returns before the generate step)."""
+    return "local" if backend_type == "ollama" else "agentic"
+
+
 # --------------------------------------------------------------------------
 # Answer parsing
 # --------------------------------------------------------------------------
 #
-# Lives here, not in a generation-specific module, because the shape it
-# parses is entirely defined by (and only meaningful together with)
-# MCPServerConfig.system_prompt's Reasoning/Answer/Sources label
-# instructions -- both libs/ollama.py and libs/anthropic.py are unaware of
-# this format.
+# Lives here, not in a generation-specific module, because the shapes these
+# parse are entirely defined by (and only meaningful together with)
+# generation_profiles.agentic/.local's prompts and, for local, its
+# response_schema -- both libs/ollama.py and libs/anthropic.py are unaware
+# of either format. server.py picks the parser matching profile_for()
+# above.
 #
 # Each label is searched for independently (not one anchored match() over
 # the whole reply) so a model that prepends chatter before the first
@@ -153,4 +182,36 @@ def parse_structured_answer(raw: str) -> tuple[str | None, str, list[str]]:
         reasoning_match.group(1).strip() if reasoning_match else None,
         answer_match.group(1).strip(),
         sources,
+    )
+
+
+def parse_structured_answer_json(raw: str) -> tuple[str | None, str, list[int]]:
+    """Split the "local" (ollama) profile's reply into (reasoning, answer,
+    source_ids). Unlike parse_structured_answer above, this profile's
+    response_schema (config.yml) constrains Ollama's output to a JSON object
+    with those exact keys, so this is a direct json.loads rather than a
+    tolerant regex scan -- the schema, not this parser, is what makes local
+    models' output reliably parseable. Falls back to (None, raw, []) on
+    malformed JSON (schema-constrained generation can still be truncated by
+    generate_timeout / a low token budget before the object closes).
+
+    sources comes back as bare integer ids (the <source id="N"> attribute),
+    not formatted "[id] title (path)" strings -- golden-eval showed
+    gemma3:4b picks correct ids reliably but can't reliably compose that
+    string itself. server.py maps these ids back to citation strings using
+    the `chunks` list it already has, mirroring what parse_structured_answer
+    gets directly from the agentic profile's regex-parsed text."""
+    raw = raw.strip()
+    try:
+        obj = json.loads(raw)
+    except json.JSONDecodeError:
+        return None, raw, []
+    if not isinstance(obj, dict) or "answer" not in obj:
+        return None, raw, []
+    reasoning = obj.get("reasoning")
+    sources = obj.get("sources") or []
+    return (
+        str(reasoning).strip() if reasoning else None,
+        str(obj["answer"]).strip(),
+        [int(s) for s in sources if isinstance(s, int) or (isinstance(s, str) and s.strip().lstrip("-").isdigit())],
     )
