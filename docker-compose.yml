@@ -7,16 +7,16 @@
 x-qdrant-http-port: &qdrant-http-port "${QDRANT_HTTP_PORT:-6333}:6333"
 x-qdrant-grpc-port: &qdrant-grpc-port "${QDRANT_GRPC_PORT:-6334}:6334"
 x-ollama-port: &ollama-port "${OLLAMA_PORT:-11434}:11434"
-x-open-webui-port: &open-webui-port "${OPEN_WEBUI_PORT:-3000}:8080"
+x-open-webui-port: &open-webui-port "${OPEN_WEBUI_PORT:-3000}:3000"
 x-mcp-server-published-port: &mcp-server-published-port "${MCP_SERVER_PORT:-8000}"
-x-reranker-published-port: &reranker-published-port "${RERANKER_PORT_HOST:-50051}"
+x-reranker-published-port: &reranker-published-port "${RERANKER_PORT:-50051}"
 x-pipelines-port: &pipelines-port "${PIPELINES_PORT:-9099}:9099"
 x-tempo-port: &tempo-port "${TEMPO_PORT:-3200}:3200"
 x-loki-port: &loki-port "${LOKI_PORT:-3100}:3100"
 x-prometheus-port: &prometheus-port "${PROMETHEUS_PORT:-9090}:9090"
 x-cadvisor-port: &cadvisor-port "${CADVISOR_PORT:-8085}:8080"
 x-node-exporter-port: &node-exporter-port "${NODE_EXPORTER_PORT:-9101}:9100"
-x-grafana-port: &grafana-port "${GRAFANA_PORT:-3001}:3000"
+x-grafana-port: &grafana-port "${GRAFANA_PORT:-3001}:3001"
 
 # mcp-server's own bind address/port *inside* its container -- this is not
 # the host-exposed port above (that's how it's reached from outside Docker;
@@ -30,6 +30,12 @@ x-mcp-internal-port: &mcp-internal-port "8000"
 # Same idea for the reranker HTTP service's own bind address/port.
 x-reranker-host: &reranker-host "0.0.0.0"
 x-reranker-internal-port: &reranker-internal-port "50051"
+
+# Must match the `cpus:` limit above -- see
+# services/reranker/src/libs/model.py's load_model() for why an
+# unset/mismatched torch thread count fights that limit instead of
+# respecting it.
+x-reranker-num-threads: &reranker-num-threads ${RERANKER_NUM_THREADS:-3}
 
 # Cross-encoder model id for the reranker service (services/reranker/config.yml
 # only has max_length -- the model itself is an env var so it can be swapped
@@ -46,15 +52,30 @@ x-force-ingest: &force-ingest ${FORCE_INGEST:-false}
 # unrelated to the host-exposed ports above (those just control what's
 # reachable from outside Docker).
 x-qdrant-url: &qdrant-url "http://qdrant:6333"
-x-ollama-base-url: &ollama-base-url "http://ollama:11434"
-x-reranker-url: &reranker-url "http://reranker:50051"
+# Host/port of the Ollama instance other services talk to. Defaults to the
+# local ollama container's service name/port; point OLLAMA_HOST (and
+# OLLAMA_PORT, if it's not on 11434) at an external Ollama instance instead
+# (e.g. OLLAMA_HOST=192.168.1.50) to skip running one locally -- see
+# `make models-up`. OLLAMA_PORT does double duty: it's also the local
+# container's host-published port mapping above, since for the local case
+# both happen to be the same port.
+x-ollama-address: &ollama-address "${OLLAMA_HOST:-ollama}:${OLLAMA_PORT:-11434}"
+x-ollama-url: &ollama-url "http://${OLLAMA_HOST:-ollama}:${OLLAMA_PORT:-11434}"
+
+# Host/port of the reranker instance mcp-server talks to. Same pattern as
+# x-ollama-url above: defaults to the local `reranker` service's name/port;
+# point RERANKER_HOST (and RERANKER_PORT, if it's not on 50051) at an
+# external reranker instance instead to skip running one locally -- see
+# `make reranker-up`. RERANKER_PORT does double duty: it's also the local
+# container's host-published port mapping above.
+x-reranker-url: &reranker-url "http://${RERANKER_HOST:-reranker}:${RERANKER_PORT:-50051}"
 x-mcp-url: &mcp-url "http://mcp-server:8000/mcp"
 x-pipelines-url: &pipelines-url "http://open-webui-pipelines:9099"
 
 # otel-collector's OTLP gRPC endpoint -- best-effort, not a hard dependency:
 # ingest/mcp-server/reranker still start fine (see _common/tracing.py) when
 # the monitoring profile is down, they just have nowhere to export spans.
-x-otel-endpoint: &otel-endpoint "http://otel-collector:4317"
+x-otel-url: &otel-url "http://otel-collector:4317"
 
 # Required, no default -- fails fast with a clear message if unset, instead
 # of silently ingesting into/serving from the wrong collection or model.
@@ -118,6 +139,8 @@ services:
     image: ollama/ollama:latest
     container_name: rag-ollama
     restart: unless-stopped
+    profiles:
+      - models
     environment:
       # "-1": once a model is loaded into memory it stays loaded forever
       # (never auto-unloaded after Ollama's default 5m idle timeout).
@@ -138,13 +161,15 @@ services:
   ollama-pull:
     image: ollama/ollama:latest
     container_name: rag-ollama-pull
+    profiles:
+      - models
     mem_limit: 256m
     cpus: 0.25
     depends_on:
       ollama:
         condition: service_healthy
     environment:
-      OLLAMA_HOST: "ollama:11434"
+      OLLAMA_HOST: *ollama-address
       MODEL_INSTRUCT_INTERNAL: *model-instruct-internal
       MODEL_EMBED: *model-embed
     # Script lives in services/ollama-pull/entrypoint.sh (bind-mounted, not
@@ -173,7 +198,7 @@ services:
       # own model picker, which only ever needs the pipelines-backed RAG
       # model below.
       ENABLE_OLLAMA_API: "false"
-      OLLAMA_BASE_URL: *ollama-base-url
+      OLLAMA_BASE_URL: *ollama-url
       # Registers the pipelines service (below) as an OpenAI-compatible
       # connection, so its rag_pipeline.py shows up as its own selectable
       # model ("RAG (UE Docs)") in the chat model picker -- distinct from
@@ -208,8 +233,6 @@ services:
     volumes:
       - openwebui_data:/app/backend/data
     depends_on:
-      ollama:
-        condition: service_healthy
       open-webui-pipelines:
         condition: service_healthy
 
@@ -269,11 +292,11 @@ services:
     environment:
       QDRANT_URL: *qdrant-url
       QDRANT_COLLECTION: *qdrant-collection
-      OLLAMA_BASE_URL: *ollama-base-url
+      OLLAMA_BASE_URL: *ollama-url
       MODEL_EMBED: *model-embed
       FORCE_INGEST: *force-ingest
       LOG_LEVEL: *log-level
-      OTEL_EXPORTER_OTLP_ENDPOINT: *otel-endpoint
+      OTEL_EXPORTER_OTLP_ENDPOINT: *otel-url
       # Content/state paths, chunking, and upsert batch size live in
       # ingest/config.yml now, not here -- see that file.
     volumes:
@@ -281,8 +304,6 @@ services:
       - ingest_state:/state
     depends_on:
       qdrant:
-        condition: service_healthy
-      ollama:
         condition: service_healthy
     restart: "no"
 
@@ -292,6 +313,11 @@ services:
   # independently. Model is MODEL_RERANKER below; max_length lives in
   # services/reranker/config.yml.
   reranker:
+    # Profile-gated like ollama/ollama-pull above (profiles: ["models"]) --
+    # `make up` never starts it; `make reranker-up`/`reranker-down` manage
+    # it on its own, independent of the rest of the stack (e.g. run it on
+    # a different, beefier host and point RERANKER_HOST there instead).
+    profiles: ["reranker"]
     build:
       # Root context (not ./services/reranker) because the Dockerfile also
       # needs /services/_common, shared with ingest and mcp-server (config
@@ -315,13 +341,9 @@ services:
         protocol: tcp
     environment:
       MODEL_RERANKER: *model-reranker
-      # Must match the `cpus:` limit above -- see
-      # services/reranker/src/libs/model.py's load_model() for why an
-      # unset/mismatched torch thread count fights that limit instead of
-      # respecting it.
-      RERANKER_NUM_THREADS: "3"
+      RERANKER_NUM_THREADS: *reranker-num-threads
       LOG_LEVEL: *log-level
-      OTEL_EXPORTER_OTLP_ENDPOINT: *otel-endpoint
+      OTEL_EXPORTER_OTLP_ENDPOINT: *otel-url
     volumes:
       - ./services/reranker/src:/app/src
       - ./services/reranker/config.yml:/app/config.yml
@@ -362,7 +384,7 @@ services:
     environment:
       QDRANT_URL: *qdrant-url
       QDRANT_COLLECTION: *qdrant-collection
-      OLLAMA_BASE_URL: *ollama-base-url
+      OLLAMA_BASE_URL: *ollama-url
       MODEL_EMBED: *model-embed
       MODEL_INSTRUCT_INTERNAL: *model-instruct-internal
       MODEL_INSTRUCT_EXTERNAL: *model-instruct-external
@@ -371,7 +393,7 @@ services:
       MCP_PORT: *mcp-internal-port
       RERANKER_URL: *reranker-url
       LOG_LEVEL: *log-level
-      OTEL_EXPORTER_OTLP_ENDPOINT: *otel-endpoint
+      OTEL_EXPORTER_OTLP_ENDPOINT: *otel-url
       # Reranker on/off, TOP_K_RETRIEVE/RERANK, backend.type/max_tokens, the
       # system prompt, and anthropic_chat live in mcp_server/config.yml now
       # (search_tools/anthropic_chat top-level keys), not here -- see that
@@ -419,18 +441,16 @@ services:
       timeout: 5s
       retries: 10
       start_period: 10s
+    # No depends_on entry for reranker -- it's profile-gated now (see its
+    # `profiles: ["reranker"]` above), same reasoning as ollama not being a
+    # dependency here: RERANKER_URL may point at a reranker that isn't part
+    # of this compose project at all (a different host/profile invocation),
+    # so compose can't express "wait for it" generically. Only actually
+    # needed when config.yml's search_tools.reranker.enabled is true --
+    # start it first with `make reranker-up` in that case.
     depends_on:
       qdrant:
         condition: service_healthy
-      ollama:
-        condition: service_healthy
-      # service_started, not service_healthy -- the reranker's healthcheck
-      # only passes once its model finishes loading (can be slow on a cold
-      # cache), and mcp-server shouldn't block startup on that. It's also
-      # only actually needed when config.yml's reranker.enabled is true,
-      # which compose has no way to know about.
-      reranker:
-        condition: service_started
 
   # Observability stack. None of the services above are wired to emit
   # OTLP yet -- this brings up the storage/collector/dashboard layer only

@@ -10,7 +10,7 @@
 # deployment running backend.type: anthropic_token/anthropic_subscription
 # instead (see services/mcp_server/config.yml) has no local reasoning model
 # to pull, so this script skips that step -- logging why -- instead of
-# failing, keeping `make up`/`make pull-models` green either way.
+# failing, keeping `make up`/`make models-pull` green either way.
 set -eu
 
 if [ -n "${MODEL_INSTRUCT_INTERNAL:-}" ]; then

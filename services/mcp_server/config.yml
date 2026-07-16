@@ -24,7 +24,7 @@ search_tools:
     # adjacent-but-wrong chunk above the actual answer (see AGENTS.md's
     # search-quality notes). Good for quick local iteration, or when the
     # reranker service isn't running.
-    enabled: true
+    enabled: false
     # null | float in (0, 1]. Confidence-gated cutoff applied after reranking,
     # before top_k_rerank slicing: if the top-scoring chunk's rerank_score is
     # >= this value, every chunk scoring below it is dropped (a confidently
@@ -81,7 +81,7 @@ search_tools:
     #                            subprocess rather than just a different SDK
     #                            credential. Ignores max_tokens below (the
     #                            CLI doesn't expose that control).
-    type: "anthropic_subscription"
+    type: "ollama"
     # Placeholder -- overwritten at startup from MODEL_INSTRUCT_INTERNAL or
     # MODEL_INSTRUCT_EXTERNAL, whichever type above selects (see server.py).
     # Whatever is written here is ignored.
