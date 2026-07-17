@@ -10,7 +10,7 @@ Current state: infra skeleton, ingestion pipeline, and a query-time MCP server a
 
 User-facing service list, ports, defaults, and make targets: see README's [Service links](./README.md#service-links), [Configuration](./README.md#configuration), and [Make targets](./README.md#make-targets) sections. This section only covers what isn't there — code layout and architecture.
 
-- `ollama` and `reranker` both live outside this repo's compose project entirely now, as a standalone portable deployment under [`remote-modelx/`](./remote-modelx), with its own `docker-compose.yml`/`README.md`/`AGENTS.md`. This repo only sets `OLLAMA_HOST`/`OLLAMA_PORT`/`RERANKER_HOST`/`RERANKER_PORT` (`.env`) to reach them, defaulting to `host.docker.internal`.
+- `ollama` and `reranker` both live outside this repo's compose project entirely now, as an external deployment this repo doesn't own or manage. This repo only sets `OLLAMA_HOST`/`OLLAMA_PORT`/`RERANKER_HOST`/`RERANKER_PORT` (`.env`) to reach them, defaulting to `host.docker.internal`.
 - `MODEL_INSTRUCT_INTERNAL` uses `search_tools.generation_profiles.local` (`config.yml`) for its prompt/sampler options/response schema, distinct from the `agentic` profile used by the Claude backends below — see that key's comments.
 - `pipelines` — [`services/open_webui_pipelines/rag_pipeline.py`](./services/open_webui_pipelines/rag_pipeline.py) is a plain MCP client (`mcp` package) against `mcp-server`'s `answer_question` tool, registered in Open WebUI as an OpenAI-compatible model.
 - `ingest` — see [`services/ingest/ingest.py`](./services/ingest/ingest.py) module docstring for the chunking/manifest design.
@@ -36,7 +36,7 @@ Apply the same pattern to any future ASGI-backed service added here.
 
 ## Logging
 
-`ingest` and `mcp-server` both log via stdlib `logging`, configured once by [`services/_common/logging_config.py`](./services/_common/logging_config.py) (`configure_logging()` + `get_logger(__name__)`) -- no `print()` calls in service code. `LOG_LEVEL` (default `INFO`) is read only inside that module, not by each service's entrypoint, since the setup is identical across both. The standalone reranker (`remote-modelx/reranker`) uses a vendored copy of the same module -- see [`remote-modelx/AGENTS.md`](./remote-modelx/AGENTS.md).
+`ingest` and `mcp-server` both log via stdlib `logging`, configured once by [`services/_common/logging_config.py`](./services/_common/logging_config.py) (`configure_logging()` + `get_logger(__name__)`) -- no `print()` calls in service code. `LOG_LEVEL` (default `INFO`) is read only inside that module, not by each service's entrypoint, since the setup is identical across both.
 
 ## Git safety
 

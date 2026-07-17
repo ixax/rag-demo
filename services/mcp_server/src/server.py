@@ -5,8 +5,8 @@ Pipeline for both tools:
   1. embed the query with MODEL_EMBED (same model used at ingest time,
      so query and document vectors live in the same space)
   2. fetch TOP_K_RETRIEVE nearest chunks from Qdrant
-  3. rerank those candidates via the standalone reranker HTTP service (see
-     /remote-modelx/reranker) and keep the top TOP_K_RERANK -- skippable via
+  3. rerank those candidates via an external reranker HTTP service this repo
+     doesn't own, and keep the top TOP_K_RERANK -- skippable via
      config.yml's search_tools.reranker.enabled
   4. `answer_question` additionally feeds the reranked chunks as context to a
      generation backend and returns its generated answer. The backend is
@@ -100,9 +100,9 @@ MCP_PORT = env.int("MCP_PORT")
 # Generation model, one env var per search_tools.backend.type: MODEL_INSTRUCT_INTERNAL
 # (Ollama) is required only when backend.type is actually "ollama" -- an
 # anthropic_token/anthropic_subscription-only deployment doesn't need to
-# pull/run a local reasoning model at all (see remote-modelx/ollama's
-# ollama-pull service, which skips the pull instead of failing when this is
-# unset). MODEL_INSTRUCT_
+# pull/run a local reasoning model at all (the external Ollama deployment's
+# own pull step skips the pull instead of failing when this is unset).
+# MODEL_INSTRUCT_
 # EXTERNAL (either anthropic_* variant) is only required when backend.type
 # starts with "anthropic" -- BackendConfig's model_validator enforces that
 # once the right one is picked and injected below.

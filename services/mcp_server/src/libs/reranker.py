@@ -1,7 +1,7 @@
-"""Reranking config schema + the HTTP client for the standalone reranker
-service (see /remote-modelx/reranker). mcp-server doesn't run the
-cross-encoder in-process -- this is a thin network client, so mcp-server
-doesn't need sentence-transformers/torch as dependencies.
+"""Reranking config schema + the HTTP client for an external reranker
+service this repo doesn't own. mcp-server doesn't run the cross-encoder
+in-process -- this is a thin network client, so mcp-server doesn't need
+sentence-transformers/torch as dependencies.
 """
 
 from __future__ import annotations

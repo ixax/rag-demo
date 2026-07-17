@@ -15,7 +15,7 @@ Report only pass/fail per file plus the exact error text if any -- don't editori
 
 1. **Identify the files and their services.** Your task input names one or more repo-relative `.py` paths (space- or newline-separated, e.g. `services/ingest/ingest.py services/mcp_server/src/server.py`). If none was given, stop and report that you need at least one.
 
-2. **Map each file to its service's Docker image and in-container path**, then group files by service -- you'll do one `docker run` per service, not one per file. This repo has two service images, each built from the repo root (`docker compose build <service>`), plus a shared `services/_common` copied into both. (The reranker now lives in its own standalone project at `remote-modelx/reranker/` -- not part of this repo's `services/` or `docker-compose.yml` -- so it's out of scope for this agent.)
+2. **Map each file to its service's Docker image and in-container path**, then group files by service -- you'll do one `docker run` per service, not one per file. This repo has two service images, each built from the repo root (`docker compose build <service>`), plus a shared `services/_common` copied into both. (The reranker now lives in its own standalone, externally managed deployment -- not part of this repo's `services/` or `docker-compose.yml` -- so it's out of scope for this agent.)
 
    | Path prefix | Image (service name) | In-container path |
    |---|---|---|

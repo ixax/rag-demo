@@ -12,9 +12,9 @@
 # unit distinct from anthropic_chat below, which is an unrelated,
 # retrieval-free tool that just happens to live in this same file.
 search_tools:
-  # Reranking between Qdrant retrieval and generation, via the standalone
-  # reranker HTTP service (see /remote-modelx/reranker) -- its
-  # model/max_length live in remote-modelx/reranker/config.yml, not here.
+  # Reranking between Qdrant retrieval and generation, via an external
+  # reranker HTTP service this repo doesn't own -- its model/max_length are
+  # that deployment's own config, not this file's concern.
   reranker:
     # true | false. When false, retrieval falls back to plain Qdrant
     # cosine-similarity order: the reranker service is never called, no

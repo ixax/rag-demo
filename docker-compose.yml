@@ -28,8 +28,8 @@ x-force-ingest: &force-ingest ${FORCE_INGEST:-false}
 # Internal (container-network) service URLs, composed once instead of
 # repeated as literals in every service that needs them.
 x-qdrant-url: &qdrant-url "http://qdrant:6333"
-# Ollama and the reranker both live outside this compose project now (see
-# ./remote-modelx/) -- default to host.docker.internal, which resolves back
+# Ollama and the reranker both live outside this compose project now --
+# default to host.docker.internal, which resolves back
 # to the Docker host from inside a container on Docker Desktop (Mac/Windows)
 # out of the box; on Linux it needs each consuming service's `extra_hosts:
 # ["host.docker.internal:host-gateway"]` entry below (Docker Engine
@@ -82,8 +82,7 @@ services:
       - *open-webui-port
     # Lets OLLAMA_BASE_URL's default (host.docker.internal) resolve on
     # Linux, where it isn't automatically added like it is on Docker
-    # Desktop (Mac/Windows) -- see x-ollama-url above and
-    # ./remote-modelx/README.md.
+    # Desktop (Mac/Windows) -- see x-ollama-url above.
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:
@@ -268,11 +267,10 @@ services:
       retries: 10
       start_period: 10s
     # No depends_on entry for ollama/reranker -- both live outside this
-    # compose project entirely now (see ./remote-modelx/), so compose can't
-    # express "wait for it" here; make sure they're up first (see
-    # remote-modelx/README.md)
-    # when config.yml needs them (search_tools.backend.type: "ollama" /
-    # search_tools.reranker.enabled: true).
+    # compose project entirely now, so compose can't express "wait for it"
+    # here; make sure they're up first when config.yml needs them
+    # (search_tools.backend.type: "ollama" / search_tools.reranker.enabled:
+    # true).
     depends_on:
       qdrant:
         condition: service_healthy
