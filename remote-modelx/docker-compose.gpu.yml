@@ -1,7 +1,6 @@
 # Optional override: reserves the host's NVIDIA GPU for the `ollama`
 # service. Apply on top of the base file, don't replace it:
-#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
-# or `make up-gpu`.
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build
 #
 # Requires an NVIDIA GPU reachable from Docker -- on Windows that's Docker
 # Desktop with the WSL2 backend plus the NVIDIA driver installed on the
@@ -9,10 +8,6 @@
 # driver install inside WSL/the container). On Linux, the NVIDIA Container
 # Toolkit. Not applicable on macOS -- Docker Desktop there has no GPU
 # passthrough path (Metal or otherwise) into containers.
-#
-# Only `ollama` is covered here. `reranker`'s Dockerfile installs the
-# CPU-only torch wheel (see its RUN pip install line) -- using its GPU too
-# needs that changed to a CUDA build, not just this file.
 services:
   ollama:
     deploy:

@@ -1,0 +1,96 @@
+# Standalone Ollama + reranker deployment, meant to run together and be
+# copied into another project wholesale. Not on the same Docker network as
+# any consumer project -- consumer services reach these over the host
+# (OLLAMA_HOST/OLLAMA_PORT, RERANKER_HOST/RERANKER_PORT in the consumer's
+# own .env), not via container-name DNS.
+#
+#   cp .env.example .env   # set MODEL_EMBED and MODEL_RERANKER (required)
+#   docker compose up -d --build
+#
+# GPU: docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    restart: unless-stopped
+    environment:
+      # "-1": once a model is loaded into memory it stays loaded forever
+      # (never auto-unloaded after Ollama's default 5m idle timeout).
+      # Trades RAM for avoiding the ~1 minute cold-load stall (model file
+      # read + llama-server spin-up) on the first request after idle.
+      OLLAMA_KEEP_ALIVE: "-1"
+    ports:
+      - "${OLLAMA_PORT:-11434}:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  ollama-pull:
+    image: ollama/ollama:latest
+    container_name: ollama-pull
+    mem_limit: 256m
+    cpus: 0.25
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      OLLAMA_HOST: "ollama:11434"
+      MODEL_INSTRUCT_INTERNAL: "${MODEL_INSTRUCT_INTERNAL:-}"
+      MODEL_EMBED: "${MODEL_EMBED:?set MODEL_EMBED, e.g. in a .env file next to this docker-compose.yml}"
+    # Script lives in ollama/entrypoint.sh (bind-mounted, not baked into
+    # the image) -- pulls, then warms each model into memory (see
+    # OLLAMA_KEEP_ALIVE: "-1" above). Skips MODEL_INSTRUCT_INTERNAL instead
+    # of failing when it's unset (a consumer project that only needs
+    # embeddings doesn't need a local reasoning model -- see that script
+    # for details).
+    entrypoint: ["/entrypoint.sh"]
+    volumes:
+      - ./ollama/entrypoint.sh:/entrypoint.sh:ro
+    restart: "no"
+
+  reranker:
+    build:
+      context: ./reranker
+    container_name: reranker
+    restart: unless-stopped
+    mem_limit: 1.5g
+    mem_reservation: 512m
+    cpus: 3.0
+    # Matches the Dockerfile CMD -- kept explicit here so it's an obvious,
+    # easy override point (e.g. append `--reload` for dev without editing
+    # the image).
+    command: ["uvicorn", "src.server:app", "--host", "0.0.0.0", "--port", "50051"]
+    ports:
+      - "${RERANKER_PORT:-50051}:50051"
+    environment:
+      MODEL_RERANKER: "${MODEL_RERANKER:?set MODEL_RERANKER, e.g. in a .env file next to this docker-compose.yml}"
+      # Must match the `cpus:` limit above -- see reranker/src/libs/model.py's
+      # load_model() docstring for why an unset torch thread count fights
+      # that limit instead of respecting it.
+      RERANKER_NUM_THREADS: "${RERANKER_NUM_THREADS:-3}"
+      LOG_LEVEL: "${LOG_LEVEL:-INFO}"
+      # Best-effort, not a hard dependency -- see reranker/src/libs/tracing.py.
+      # Point this at an otel-collector if you want traces; leave unset
+      # otherwise.
+      OTEL_EXPORTER_OTLP_ENDPOINT: "${OTEL_EXPORTER_OTLP_ENDPOINT:-}"
+    volumes:
+      - ./reranker/src:/app/src
+      - ./reranker/config.yml:/app/config.yml
+      - reranker_cache:/root/.cache/huggingface
+    healthcheck:
+      # Raw TCP check, not curl -- curl isn't installed in this image.
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/localhost/50051'"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+volumes:
+  ollama_data:
+  reranker_cache:

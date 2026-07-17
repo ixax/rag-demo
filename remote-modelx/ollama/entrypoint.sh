@@ -1,16 +1,14 @@
 #!/bin/sh
 # ollama-pull entrypoint -- pulls (and warms into memory) the Ollama models
-# this stack needs. Extracted out of docker-compose.yml's inline `command:`
-# so it can be edited/tested as a plain script instead of one-line shell
-# glued into YAML. Bind-mounted into the ollama-pull service and run as its
-# entrypoint (see docker-compose.yml).
+# a consumer project needs. Extracted out of docker-compose.yml's inline
+# `command:` so it can be edited/tested as a plain script instead of
+# one-line shell glued into YAML. Bind-mounted into the ollama-pull service
+# and run as its entrypoint (see docker-compose.yml).
 #
-# MODEL_INSTRUCT_INTERNAL is optional here, unlike MODEL_EMBED -- it's only
-# needed when mcp-server's config.yml has backend.type: "ollama". A
-# deployment running backend.type: anthropic_token/anthropic_subscription
-# instead (see services/mcp_server/config.yml) has no local reasoning model
+# MODEL_INSTRUCT_INTERNAL is optional here, unlike MODEL_EMBED -- some
+# consumer projects only need embeddings and have no local reasoning model
 # to pull, so this script skips that step -- logging why -- instead of
-# failing, keeping `make up`/`make models-pull` green either way.
+# failing.
 set -eu
 
 if [ -n "${MODEL_INSTRUCT_INTERNAL:-}" ]; then

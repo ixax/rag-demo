@@ -25,11 +25,10 @@ from fastapi import FastAPI
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from pydantic import BaseModel
 
-from _common.logging_config import configure_logging, get_logger
-from _common.tracing import configure_tracing, get_tracer
-
 from .libs.config import RerankerConfig, load_config
+from .libs.logging_config import configure_logging, get_logger
 from .libs.model import load_model, score
+from .libs.tracing import configure_tracing, get_tracer
 
 env = Env()
 MODEL_RERANKER = env.str("MODEL_RERANKER")
@@ -54,7 +53,7 @@ logger.info("reranker ready")
 
 app = FastAPI()
 # Extracts the incoming W3C trace-context header (mcp-server's httpx client
-# is instrumented too -- see _common.tracing.configure_tracing) so this
+# is instrumented too -- see libs.tracing.configure_tracing) so this
 # service's spans nest under the caller's "rerank" step instead of starting
 # a disconnected trace, and auto-creates a server span per request.
 FastAPIInstrumentor.instrument_app(app)

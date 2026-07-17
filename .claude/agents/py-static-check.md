@@ -1,6 +1,6 @@
 ---
 name: py-static-check
-description: "Runs a static check (mypy) on one or more Python files that were just edited/fixed under services/, using the exact third-party dependency versions pinned in each file's own service's requirements.txt/Docker image -- not whatever happens to be on the host. Use PROACTIVELY right after editing/fixing .py file(s) under services/ingest, services/mcp_server, services/reranker, or services/_common, to catch AttributeError-class bugs (referencing a method/enum member/attribute that doesn't exist on the actually-pinned version of a library, e.g. qdrant_client.models.Datatype.FLOAT16 not existing in qdrant-client==1.9.1) before running the code for real -- without spending the main model's tokens on it. Pass the repo-relative path(s) to the edited file(s) as the argument, space- or newline-separated (e.g. 'services/ingest/ingest.py services/mcp_server/src/server.py') -- pass all files changed in one batch of edits together rather than invoking this agent once per file. Reports either 'no static errors found' or mypy's exact error output per file, nothing else -- it does not fix anything, judge code quality/style, or run tests."
+description: "Runs a static check (mypy) on one or more Python files that were just edited/fixed under services/, using the exact third-party dependency versions pinned in each file's own service's requirements.txt/Docker image -- not whatever happens to be on the host. Use PROACTIVELY right after editing/fixing .py file(s) under services/ingest, services/mcp_server, or services/_common, to catch AttributeError-class bugs (referencing a method/enum member/attribute that doesn't exist on the actually-pinned version of a library, e.g. qdrant_client.models.Datatype.FLOAT16 not existing in qdrant-client==1.9.1) before running the code for real -- without spending the main model's tokens on it. Pass the repo-relative path(s) to the edited file(s) as the argument, space- or newline-separated (e.g. 'services/ingest/ingest.py services/mcp_server/src/server.py') -- pass all files changed in one batch of edits together rather than invoking this agent once per file. Reports either 'no static errors found' or mypy's exact error output per file, nothing else -- it does not fix anything, judge code quality/style, or run tests."
 tools: Bash
 model: haiku
 ---
@@ -15,14 +15,13 @@ Report only pass/fail per file plus the exact error text if any -- don't editori
 
 1. **Identify the files and their services.** Your task input names one or more repo-relative `.py` paths (space- or newline-separated, e.g. `services/ingest/ingest.py services/mcp_server/src/server.py`). If none was given, stop and report that you need at least one.
 
-2. **Map each file to its service's Docker image and in-container path**, then group files by service -- you'll do one `docker run` per service, not one per file. This repo has three service images, each built from the repo root (`docker compose build <service>`), plus a shared `services/_common` copied into all three:
+2. **Map each file to its service's Docker image and in-container path**, then group files by service -- you'll do one `docker run` per service, not one per file. This repo has two service images, each built from the repo root (`docker compose build <service>`), plus a shared `services/_common` copied into both. (The reranker now lives in its own standalone project at `remote-modelx/reranker/` -- not part of this repo's `services/` or `docker-compose.yml` -- so it's out of scope for this agent.)
 
    | Path prefix | Image (service name) | In-container path |
    |---|---|---|
    | `services/ingest/ingest.py` | `ingest` (image `rag-ingest`) | `/app/ingest.py` |
    | `services/ingest/...` (anything else, e.g. a future submodule) | `ingest` | `/app/<same-relative-path-under-services/ingest>` |
    | `services/mcp_server/src/...` | `mcp-server` (image `rag-mcp-server`) | `/app/src/...` (strip the `services/mcp_server/` prefix) |
-   | `services/reranker/src/...` | `reranker` (image `rag-reranker`) | `/app/src/...` (strip the `services/reranker/` prefix) |
    | `services/_common/...` | check against **every** service whose files are also in this batch (or default to `mcp-server`/`rag-mcp-server` alone if no other service file was given) -- `_common` is shared code, worth checking against each image that actually imports it | `/app/_common/...` (strip the `services/_common/` prefix) |
 
    If a path doesn't match any of these, stop and report that you don't know which service it belongs to -- don't guess.

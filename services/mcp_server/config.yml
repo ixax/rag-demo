@@ -13,8 +13,8 @@
 # retrieval-free tool that just happens to live in this same file.
 search_tools:
   # Reranking between Qdrant retrieval and generation, via the standalone
-  # reranker gRPC service (see /services/reranker) -- its model/max_length
-  # live in services/reranker/config.yml, not here.
+  # reranker HTTP service (see /remote-modelx/reranker) -- its
+  # model/max_length live in remote-modelx/reranker/config.yml, not here.
   reranker:
     # true | false. When false, retrieval falls back to plain Qdrant
     # cosine-similarity order: the reranker service is never called, no

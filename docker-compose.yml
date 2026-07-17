@@ -7,10 +7,8 @@
 # Host-exposed ports.
 x-qdrant-http-port: &qdrant-http-port "${QDRANT_HTTP_PORT:-6333}:6333"
 x-qdrant-grpc-port: &qdrant-grpc-port "${QDRANT_GRPC_PORT:-6334}:6334"
-x-ollama-port: &ollama-port "${OLLAMA_PORT:-11434}:11434"
 x-open-webui-port: &open-webui-port "${OPEN_WEBUI_PORT:-3000}:3000"
 x-mcp-server-published-port: &mcp-server-published-port "${MCP_SERVER_PORT:-8000}"
-x-reranker-published-port: &reranker-published-port "${RERANKER_PORT:-50051}"
 x-pipelines-port: &pipelines-port "${PIPELINES_PORT:-9099}:9099"
 x-tempo-port: &tempo-port "${TEMPO_PORT:-3200}:3200"
 x-loki-port: &loki-port "${LOKI_PORT:-3100}:3100"
@@ -25,23 +23,20 @@ x-grafana-port: &grafana-port "${GRAFANA_PORT:-3001}:3001"
 x-mcp-host: &mcp-host "0.0.0.0"
 x-mcp-internal-port: &mcp-internal-port "8000"
 
-# Same idea for the reranker HTTP service's own bind address/port.
-x-reranker-host: &reranker-host "0.0.0.0"
-x-reranker-internal-port: &reranker-internal-port "50051"
-
-# Must match the `cpus:` limit below -- see
-# services/reranker/src/libs/model.py's load_model().
-x-reranker-num-threads: &reranker-num-threads ${RERANKER_NUM_THREADS:-3}
-
-x-model-reranker: &model-reranker ${MODEL_RERANKER:?set MODEL_RERANKER, e.g. in a .env file next to docker-compose.yml}
 x-force-ingest: &force-ingest ${FORCE_INGEST:-false}
 
 # Internal (container-network) service URLs, composed once instead of
 # repeated as literals in every service that needs them.
 x-qdrant-url: &qdrant-url "http://qdrant:6333"
-x-ollama-address: &ollama-address "${OLLAMA_HOST:-ollama}:${OLLAMA_PORT:-11434}"
-x-ollama-url: &ollama-url "http://${OLLAMA_HOST:-ollama}:${OLLAMA_PORT:-11434}"
-x-reranker-url: &reranker-url "http://${RERANKER_HOST:-reranker}:${RERANKER_PORT:-50051}"
+# Ollama and the reranker both live outside this compose project now (see
+# ./remote-modelx/) -- default to host.docker.internal, which resolves back
+# to the Docker host from inside a container on Docker Desktop (Mac/Windows)
+# out of the box; on Linux it needs each consuming service's `extra_hosts:
+# ["host.docker.internal:host-gateway"]` entry below (Docker Engine
+# 20.10+). Point OLLAMA_HOST/_PORT / RERANKER_HOST/_PORT (.env) at a
+# different host/port instead if either runs elsewhere.
+x-ollama-url: &ollama-url "http://${OLLAMA_HOST:-host.docker.internal}:${OLLAMA_PORT:-11434}"
+x-reranker-url: &reranker-url "http://${RERANKER_HOST:-host.docker.internal}:${RERANKER_PORT:-50051}"
 x-mcp-url: &mcp-url "http://mcp-server:8000/mcp"
 x-pipelines-url: &pipelines-url "http://open-webui-pipelines:9099"
 
@@ -76,54 +71,6 @@ services:
       retries: 10
       start_period: 10s
 
-  ollama:
-    image: ollama/ollama:latest
-    container_name: rag-ollama
-    restart: unless-stopped
-    profiles:
-      - models
-    environment:
-      # "-1": once a model is loaded into memory it stays loaded forever
-      # (never auto-unloaded after Ollama's default 5m idle timeout).
-      # Trades RAM for avoiding the ~1 minute cold-load stall (model file
-      # read + llama-server spin-up) on the first request after idle.
-      OLLAMA_KEEP_ALIVE: "-1"
-    ports:
-      - *ollama-port
-    volumes:
-      - ollama_data:/root/.ollama
-    healthcheck:
-      test: ["CMD", "ollama", "list"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-      start_period: 10s
-
-  ollama-pull:
-    image: ollama/ollama:latest
-    container_name: rag-ollama-pull
-    profiles:
-      - models
-    mem_limit: 256m
-    cpus: 0.25
-    depends_on:
-      ollama:
-        condition: service_healthy
-    environment:
-      OLLAMA_HOST: *ollama-address
-      MODEL_INSTRUCT_INTERNAL: *model-instruct-internal
-      MODEL_EMBED: *model-embed
-    # Script lives in services/ollama-pull/entrypoint.sh (bind-mounted, not
-    # baked into the image) -- pulls, then warms each model into memory (see
-    # OLLAMA_KEEP_ALIVE: "-1" above). Skips MODEL_INSTRUCT_INTERNAL instead
-    # of failing when it's unset (mcp-server on backend.type:
-    # anthropic_token/anthropic_subscription doesn't need a local reasoning
-    # model -- see that script for details).
-    entrypoint: ["/entrypoint.sh"]
-    volumes:
-      - ./services/ollama-pull/entrypoint.sh:/entrypoint.sh:ro
-    restart: "no"
-
   open-webui:
     image: ghcr.io/open-webui/open-webui:main
     container_name: rag-open-webui
@@ -133,6 +80,12 @@ services:
     cpus: 0.75
     ports:
       - *open-webui-port
+    # Lets OLLAMA_BASE_URL's default (host.docker.internal) resolve on
+    # Linux, where it isn't automatically added like it is on Docker
+    # Desktop (Mac/Windows) -- see x-ollama-url above and
+    # ./remote-modelx/README.md.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       # Ollama itself is still used internally (embeddings, and previously
       # local generation) -- this only hides its models from Open WebUI's
@@ -185,8 +138,8 @@ services:
   # tool-calling.
   open-webui-pipelines:
     build:
-      # Own directory as context, not root -- unlike ingest/reranker/
-      # mcp-server, this service doesn't use services/_common.
+      # Own directory as context, not root -- unlike ingest/mcp-server,
+      # this service doesn't use services/_common.
       context: ./services/open_webui_pipelines
     container_name: rag-pipelines
     restart: unless-stopped
@@ -213,8 +166,8 @@ services:
       mcp-server:
         condition: service_started
     healthcheck:
-      # Unlike ollama/mcp-server's images, this one has curl -- use it
-      # directly instead of the raw-TCP /dev/tcp workaround those need.
+      # Unlike mcp-server's image, this one has curl -- use it directly
+      # instead of the raw-TCP /dev/tcp workaround that needs.
       test: ["CMD", "curl", "-f", "http://localhost:9099/"]
       interval: 10s
       timeout: 5s
@@ -224,12 +177,15 @@ services:
   ingest:
     build:
       # Root context (not ./services/ingest) because the Dockerfile also
-      # needs /services/_common, shared with mcp-server and the reranker
-      # service (config loading, Ollama embedding client).
+      # needs /services/_common, shared with mcp-server (config loading,
+      # Ollama embedding client).
       context: .
       dockerfile: services/ingest/Dockerfile
     container_name: rag-ingest
     profiles: ["ingest"]
+    # See open-webui's extra_hosts above -- same reasoning.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       QDRANT_URL: *qdrant-url
       QDRANT_COLLECTION: *qdrant-collection
@@ -248,54 +204,11 @@ services:
         condition: service_healthy
     restart: "no"
 
-  # See services/reranker/ and README's service links for what this does.
-  reranker:
-    profiles: ["reranker"]
-    build:
-      # Root context (not ./services/reranker) because the Dockerfile also
-      # needs /services/_common, shared with ingest and mcp-server (config
-      # loading).
-      context: .
-      dockerfile: services/reranker/Dockerfile
-    container_name: rag-reranker
-    restart: unless-stopped
-    mem_limit: 1.5g
-    mem_reservation: 512m
-    cpus: 3.0
-    # Matches the Dockerfile CMD -- kept explicit here so it's an obvious,
-    # easy override point (e.g. append `--reload` for dev without editing
-    # the image). Host/port come from the same anchors as `ports.target`
-    # below -- server.py itself doesn't read them (see its module
-    # docstring).
-    command: ["uvicorn", "src.server:app", "--host", *reranker-host, "--port", *reranker-internal-port]
-    ports:
-      - target: *reranker-internal-port
-        published: *reranker-published-port
-        protocol: tcp
-    environment:
-      MODEL_RERANKER: *model-reranker
-      RERANKER_NUM_THREADS: *reranker-num-threads
-      LOG_LEVEL: *log-level
-      OTEL_EXPORTER_OTLP_ENDPOINT: *otel-url
-    volumes:
-      - ./services/reranker/src:/app/src
-      - ./services/reranker/config.yml:/app/config.yml
-      - ./services/_common:/app/_common
-      - reranker_cache:/root/.cache/huggingface
-    healthcheck:
-      # Raw TCP check, not curl -- curl isn't installed in this image (same
-      # approach as qdrant's healthcheck above).
-      test: ["CMD-SHELL", "bash -c '</dev/tcp/localhost/50051'"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-      start_period: 10s
-
   mcp-server:
     build:
       # Root context (not ./services/mcp_server) because the Dockerfile also
-      # needs /services/_common, shared with ingest and the reranker
-      # service (config loading, Ollama embedding client).
+      # needs /services/_common, shared with ingest (config loading, Ollama
+      # embedding client).
       context: .
       dockerfile: services/mcp_server/Dockerfile
     container_name: rag-mcp-server
@@ -314,6 +227,9 @@ services:
       - target: *mcp-internal-port
         published: *mcp-server-published-port
         protocol: tcp
+    # See open-webui's extra_hosts above -- same reasoning.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       QDRANT_URL: *qdrant-url
       QDRANT_COLLECTION: *qdrant-collection
@@ -342,7 +258,7 @@ services:
       - ./services/_common:/app/_common
     healthcheck:
       # Raw TCP check, not curl -- curl isn't installed in this image (same
-      # approach as qdrant/reranker's healthchecks above). Only confirms
+      # approach as qdrant's healthcheck above). Only confirms
       # uvicorn is listening, not that a full MCP handshake succeeds -- this
       # service's only route is streamable-http's /mcp, which needs the MCP
       # protocol's own session negotiation rather than a bare GET/HEAD.
@@ -351,13 +267,12 @@ services:
       timeout: 5s
       retries: 10
       start_period: 10s
-    # No depends_on entry for reranker -- it's profile-gated now (see its
-    # `profiles: ["reranker"]` above), same reasoning as ollama not being a
-    # dependency here: RERANKER_URL may point at a reranker that isn't part
-    # of this compose project at all (a different host/profile invocation),
-    # so compose can't express "wait for it" generically. Only actually
-    # needed when config.yml's search_tools.reranker.enabled is true --
-    # start it first with `make reranker-up` in that case.
+    # No depends_on entry for ollama/reranker -- both live outside this
+    # compose project entirely now (see ./remote-modelx/), so compose can't
+    # express "wait for it" here; make sure they're up first (see
+    # remote-modelx/README.md)
+    # when config.yml needs them (search_tools.backend.type: "ollama" /
+    # search_tools.reranker.enabled: true).
     depends_on:
       qdrant:
         condition: service_healthy
@@ -515,10 +430,8 @@ services:
 
 volumes:
   qdrant_data:
-  ollama_data:
   openwebui_data:
   ingest_state:
-  reranker_cache:
   pipelines_cache:
   tempo_data:
   loki_data:

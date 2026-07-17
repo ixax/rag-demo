@@ -11,7 +11,7 @@ You verify the local RAG stack actually works end-to-end. This is a cheap, mecha
 
 ## Checklist
 
-1. **Container health** -- run `make status` (or `docker compose ps` + the health checks in the Makefile if `make` isn't available). Confirm `qdrant`, `ollama`, `mcp-server`, and `reranker` all show healthy/responding. If any container isn't even running, stop here and report which one -- don't proceed to MCP calls against a dead stack.
+1. **Container health.** Run `make status` (or `docker compose ps` + the health checks in the Makefile if `make` isn't available) for this repo's own stack -- confirm `qdrant` and `mcp-server` show healthy/responding. Ollama and the reranker are a separate standalone project now (`remote-modelx`) -- check them directly instead: `curl -sf http://${OLLAMA_HOST:-host.docker.internal}:${OLLAMA_PORT:-11434}/api/tags` and `curl -sf http://${RERANKER_HOST:-host.docker.internal}:${RERANKER_PORT:-50051}/rerank` won't necessarily be GET-able, so for the reranker prefer `cd remote-modelx && docker compose ps` if it's running locally, otherwise a plain TCP/HTTP reachability check against `RERANKER_HOST`/`RERANKER_PORT`. If any of the four isn't reachable, stop here and report which one -- don't proceed to MCP calls against a dead stack.
 
 2. **Retrieval only** -- call `mcp__rag__search_documents` with a query you're confident matches indexed content (e.g. "DDS Converter" or "Unified Editor installation" -- see `./content` topics if unsure: asset-pipeline, dds-converter, engineering, ue, updates). Verify:
    - `results` is non-empty.
@@ -24,14 +24,14 @@ You verify the local RAG stack actually works end-to-end. This is a cheap, mecha
    - `trace` has all the steps from step 2 plus `generate`, UNLESS `services/mcp_server/config.yml`'s `backend.type` is `""` (empty) -- in that case `answer` is `null` and there's no `generate` step, which is correct, not a failure.
    - If generation ran: `answer` is non-empty text, and `reasoning`/`sources` are either populated or explicitly `null`/`[]` (never missing keys).
 
-4. **Reranker service directly (optional, only if step 2/3 shows rerank_score always null while config.yml says reranker.enabled: true)** -- that mismatch means the reranker HTTP service likely isn't reachable from mcp-server. Check `docker compose logs reranker --tail 30` for load/connection errors, and confirm `RERANKER_URL` in mcp-server's environment matches the reranker service's actual address (`http://reranker:50051` in this repo's docker-compose.yml).
+4. **Reranker service directly (optional, only if step 2/3 shows rerank_score always null while config.yml says reranker.enabled: true)** -- that mismatch means the reranker HTTP service likely isn't reachable from mcp-server. If it's running locally, check `cd remote-modelx && docker compose logs reranker --tail 30` for load/connection errors, and confirm `RERANKER_HOST`/`RERANKER_PORT` in this repo's `.env` actually point at where that service is listening.
 
 ## Reporting
 
 End with a short pass/fail summary, one line per check:
 
 ```
-[PASS] containers healthy (qdrant, ollama, mcp-server, reranker)
+[PASS] qdrant/mcp-server containers healthy; ollama/reranker reachable at configured OLLAMA_HOST/RERANKER_HOST
 [PASS] search_documents: 3 results, trace has embed_query/qdrant_search/rerank
 [FAIL] answer_question: trace missing "generate" step, but backend.type is "ollama" (not empty) -- expected generation to run
 ```

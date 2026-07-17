@@ -1,6 +1,6 @@
 ---
 name: embed-model-bench
-description: "Benchmarks a single Ollama embedding model against a fixed, hardcoded RU/EN documentation-style corpus -- dimension, latency, cross-lingual retrieval accuracy (top-1 + MRR), and a truncation probe for models with a short context window (e.g. multilingual-e5-base's 512-token limit). Use PROACTIVELY when the user asks to 'test an embedding model', 'benchmark MODEL_EMBED candidates', 'протестируй модель эмбеддингов', 'сравни модели эмбеддингов', or when comparing candidates listed in .env.example above MODEL_EMBED. Pass the exact Ollama model name/tag as the argument (e.g. 'bge-m3', 'BorisTM/bge-m3_en_ru', 'multilingual-e5-base'). This agent deploys its own test environment (starts the ollama container, pulls the model) and reports pass/fail-style metrics -- it does not edit any repo files (.env, .env.example, config.yml) or pick a winner; that decision belongs to the calling context after comparing multiple runs."
+description: "Benchmarks a single Ollama embedding model against a fixed, hardcoded RU/EN documentation-style corpus -- dimension, latency, cross-lingual retrieval accuracy (top-1 + MRR), and a truncation probe for models with a short context window (e.g. multilingual-e5-base's 512-token limit). Use PROACTIVELY when the user asks to 'test an embedding model', 'benchmark MODEL_EMBED candidates', 'протестируй модель эмбеддингов', 'сравни модели эмбеддингов', or when comparing candidates listed in .env.example above MODEL_EMBED. Pass the exact Ollama model name/tag as the argument (e.g. 'bge-m3', 'BorisTM/bge-m3_en_ru', 'multilingual-e5-base'). This agent deploys its own test environment (starts the standalone ollama container under remote-modelx, pulls the model) and reports pass/fail-style metrics -- it does not edit any repo files (.env, .env.example, config.yml) or pick a winner; that decision belongs to the calling context after comparing multiple runs."
 tools: Bash
 model: haiku
 ---
@@ -13,10 +13,10 @@ You benchmark exactly one Ollama embedding model, named in your task input, agai
 
 1. **Identify the model.** Your task input names exactly one Ollama model tag to test (e.g. `bge-m3`, `BorisTM/bge-m3_en_ru`, `Alibaba-NLP/gte-multilingual-base`, `multilingual-e5-base`). If no model name was given, stop and report that you need one -- do not guess.
 
-2. **Deploy the test environment.**
-   - `docker compose up -d ollama` (repo root -- this repo's `docker-compose.yml` defines an `ollama` service on container name `rag-ollama`).
-   - Wait for it to be ready: poll `docker exec rag-ollama ollama list` every 2s until it succeeds (up to ~60s). If it never succeeds, stop and report the failure (don't proceed to pull/benchmark against a dead daemon).
-   - Pull the model: `docker exec rag-ollama ollama pull "<model>"`. If the pull fails (unknown tag, network error), stop and report the exact error -- don't retry more than once.
+2. **Deploy the test environment.** Ollama is a standalone deployment under `remote-modelx` (not part of this repo's own `docker-compose.yml`), container name `ollama`.
+   - `cd remote-modelx && MODEL_EMBED=dummy MODEL_RERANKER=dummy docker compose up -d ollama` (the merged compose file requires `MODEL_EMBED`/`MODEL_RERANKER` to be set for the file to parse at all, even though you're only starting `ollama` here -- `dummy` is fine since you're not starting `ollama-pull`/`reranker`).
+   - Wait for it to be ready: poll `docker exec ollama ollama list` every 2s until it succeeds (up to ~60s). If it never succeeds, stop and report the failure (don't proceed to pull/benchmark against a dead daemon).
+   - Pull the model: `docker exec ollama ollama pull "<model>"`. If the pull fails (unknown tag, network error), stop and report the exact error -- don't retry more than once.
 
 3. **Write the benchmark script exactly as follows** to `/tmp/embed_bench.py` (use a `cat > /tmp/embed_bench.py <<'PYEOF' ... PYEOF` heredoc so nothing is reinterpreted by the shell):
 
@@ -191,7 +191,7 @@ if __name__ == "__main__":
     raise SystemExit(main())
 ```
 
-4. **Run it:** `python3 /tmp/embed_bench.py "<model>" http://localhost:$OLLAMA_PORT` (default `OLLAMA_PORT` is 11434 if unset -- check `.env` in repo root, or just use `http://localhost:11434`). Also capture `docker exec rag-ollama ollama show "<model>"` output (gives parameter size / quantization / context length info reported by Ollama itself) to fold into your report.
+4. **Run it:** `python3 /tmp/embed_bench.py "<model>" http://localhost:$OLLAMA_PORT` (default `OLLAMA_PORT` is 11434 if unset -- check `remote-modelx/.env`, or just use `http://localhost:11434`). Also capture `docker exec ollama ollama show "<model>"` output (gives parameter size / quantization / context length info reported by Ollama itself) to fold into your report.
 
 5. **Report** the following, plainly, no editorializing:
    - Model name tested.
