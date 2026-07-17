@@ -1,9 +1,10 @@
 # Scalars, grouped by meaning -- x-* keys are Compose "extension fields",
 # ignored by the engine, used here purely as a place to define each value
 # once (via a YAML anchor `&name`) and reuse it below (via alias `*name`).
+# Variable reference (defaults, purpose, when each is required): README.md's
+# "Configuration" section.
 
-# Host-exposed ports. Defaults kept -- these are dev-convenience values, fine
-# to run with unset.
+# Host-exposed ports.
 x-qdrant-http-port: &qdrant-http-port "${QDRANT_HTTP_PORT:-6333}:6333"
 x-qdrant-grpc-port: &qdrant-grpc-port "${QDRANT_GRPC_PORT:-6334}:6334"
 x-ollama-port: &ollama-port "${OLLAMA_PORT:-11434}:11434"
@@ -18,12 +19,9 @@ x-cadvisor-port: &cadvisor-port "${CADVISOR_PORT:-8085}:8080"
 x-node-exporter-port: &node-exporter-port "${NODE_EXPORTER_PORT:-9101}:9100"
 x-grafana-port: &grafana-port "${GRAFANA_PORT:-3001}:3001"
 
-# mcp-server's own bind address/port *inside* its container -- this is not
-# the host-exposed port above (that's how it's reached from outside Docker;
-# these two happen to both default to 8000, but changing one doesn't imply
-# the other). Anchored so `command`, `ports.target`, and the MCP_HOST/
-# MCP_PORT env vars server.py reads can't drift apart into three different
-# hardcoded "8000"/"0.0.0.0" literals.
+# mcp-server's own bind address/port *inside* its container -- anchored so
+# `command`, `ports.target`, and the MCP_HOST/MCP_PORT env vars below can't
+# drift apart.
 x-mcp-host: &mcp-host "0.0.0.0"
 x-mcp-internal-port: &mcp-internal-port "8000"
 
@@ -31,88 +29,31 @@ x-mcp-internal-port: &mcp-internal-port "8000"
 x-reranker-host: &reranker-host "0.0.0.0"
 x-reranker-internal-port: &reranker-internal-port "50051"
 
-# Must match the `cpus:` limit above -- see
-# services/reranker/src/libs/model.py's load_model() for why an
-# unset/mismatched torch thread count fights that limit instead of
-# respecting it.
+# Must match the `cpus:` limit below -- see
+# services/reranker/src/libs/model.py's load_model().
 x-reranker-num-threads: &reranker-num-threads ${RERANKER_NUM_THREADS:-3}
 
-# Cross-encoder model id for the reranker service (services/reranker/config.yml
-# only has max_length -- the model itself is an env var so it can be swapped
-# without editing that file).
 x-model-reranker: &model-reranker ${MODEL_RERANKER:?set MODEL_RERANKER, e.g. in a .env file next to docker-compose.yml}
-
-# Run-mode toggle. Default kept -- false (incremental) is the safe default;
-# `make ingest-force` overrides it to true for a single run.
 x-force-ingest: &force-ingest ${FORCE_INGEST:-false}
 
-# Internal (container-network) service URLs. Composed once here instead of
-# being repeated as literals in every service that talks to qdrant/ollama/
-# the reranker -- the ports are each service's fixed internal listen port,
-# unrelated to the host-exposed ports above (those just control what's
-# reachable from outside Docker).
+# Internal (container-network) service URLs, composed once instead of
+# repeated as literals in every service that needs them.
 x-qdrant-url: &qdrant-url "http://qdrant:6333"
-# Host/port of the Ollama instance other services talk to. Defaults to the
-# local ollama container's service name/port; point OLLAMA_HOST (and
-# OLLAMA_PORT, if it's not on 11434) at an external Ollama instance instead
-# (e.g. OLLAMA_HOST=192.168.1.50) to skip running one locally -- see
-# `make models-up`. OLLAMA_PORT does double duty: it's also the local
-# container's host-published port mapping above, since for the local case
-# both happen to be the same port.
 x-ollama-address: &ollama-address "${OLLAMA_HOST:-ollama}:${OLLAMA_PORT:-11434}"
 x-ollama-url: &ollama-url "http://${OLLAMA_HOST:-ollama}:${OLLAMA_PORT:-11434}"
-
-# Host/port of the reranker instance mcp-server talks to. Same pattern as
-# x-ollama-url above: defaults to the local `reranker` service's name/port;
-# point RERANKER_HOST (and RERANKER_PORT, if it's not on 50051) at an
-# external reranker instance instead to skip running one locally -- see
-# `make reranker-up`. RERANKER_PORT does double duty: it's also the local
-# container's host-published port mapping above.
 x-reranker-url: &reranker-url "http://${RERANKER_HOST:-reranker}:${RERANKER_PORT:-50051}"
 x-mcp-url: &mcp-url "http://mcp-server:8000/mcp"
 x-pipelines-url: &pipelines-url "http://open-webui-pipelines:9099"
 
-# otel-collector's OTLP gRPC endpoint -- best-effort, not a hard dependency:
-# ingest/mcp-server/reranker still start fine (see _common/tracing.py) when
-# the monitoring profile is down, they just have nowhere to export spans.
+# Best-effort, not a hard dependency -- see services/_common/tracing.py.
 x-otel-url: &otel-url "http://otel-collector:4317"
 
-# Required, no default -- fails fast with a clear message if unset, instead
-# of silently ingesting into/serving from the wrong collection or model.
 x-qdrant-collection: &qdrant-collection ${QDRANT_COLLECTION:?set QDRANT_COLLECTION, e.g. in a .env file next to docker-compose.yml}
 x-model-embed: &model-embed ${MODEL_EMBED:?set MODEL_EMBED, e.g. in a .env file next to docker-compose.yml}
-
-# Local reasoning model pulled into Ollama -- optional (empty default),
-# unlike MODEL_EMBED/QDRANT_COLLECTION above: only required when
-# mcp-server's config.yml has backend.type: "ollama" (see
-# services/mcp_server/src/server.py, which fails fast itself in that case).
-# A backend.type of anthropic_token/anthropic_subscription needs no local
-# reasoning model at all -- services/ollama-pull/entrypoint.sh skips
-# pulling/warming it instead of failing when this is unset.
 x-model-instruct-internal: &model-instruct-internal "${MODEL_INSTRUCT_INTERNAL:-}"
-
-# Generation model for mcp-server's search_tools.backend anthropic_token/
-# anthropic_subscription variants -- unlike MODEL_EMBED above, optional
-# (empty default): only required when search_tools.backend.type actually
-# selects it (see services/mcp_server/src/server.py, which fails fast
-# itself if it's unset in that case).
 x-model-instruct-external: &model-instruct-external "${MODEL_INSTRUCT_EXTERNAL:-}"
-
-# Claude model for the standalone anthropic_chat tool -- independent of
-# MODEL_INSTRUCT_EXTERNAL above (search_tools.backend and anthropic_chat can
-# point at different Claude models). Optional (empty default): only
-# required when config.yml's anthropic_chat.enabled is true.
 x-model-chat: &model-chat "${MODEL_CHAT:-}"
-
-# Auth key the pipelines service and Open WebUI's OpenAI-compatible
-# connection to it must agree on -- both read from the same anchor so they
-# can't drift apart.
 x-pipelines-api-key: &pipelines-api-key "${PIPELINES_API_KEY:-0p3n-w3bu!}"
-
-# Log level for ingest/mcp-server/reranker's shared _common.logging_config
-# setup (Python logging level names: DEBUG/INFO/WARNING/ERROR/CRITICAL).
-# Defaults to INFO -- unlike the required vars above, a missing/typo'd
-# value shouldn't stop a service from starting.
 x-log-level: &log-level "${LOG_LEVEL:-INFO}"
 
 services:
@@ -307,16 +248,8 @@ services:
         condition: service_healthy
     restart: "no"
 
-  # Cross-encoder reranking as a standalone FastAPI/HTTP service (see
-  # /services/reranker) -- keeps sentence-transformers/torch out of
-  # mcp-server's image, and lets the reranker be swapped/restarted/scaled
-  # independently. Model is MODEL_RERANKER below; max_length lives in
-  # services/reranker/config.yml.
+  # See services/reranker/ and README's service links for what this does.
   reranker:
-    # Profile-gated like ollama/ollama-pull above (profiles: ["models"]) --
-    # `make up` never starts it; `make reranker-up`/`reranker-down` manage
-    # it on its own, independent of the rest of the stack (e.g. run it on
-    # a different, beefier host and point RERANKER_HOST there instead).
     profiles: ["reranker"]
     build:
       # Root context (not ./services/reranker) because the Dockerfile also
@@ -394,37 +327,14 @@ services:
       RERANKER_URL: *reranker-url
       LOG_LEVEL: *log-level
       OTEL_EXPORTER_OTLP_ENDPOINT: *otel-url
-      # Reranker on/off, TOP_K_RETRIEVE/RERANK, backend.type/max_tokens, the
-      # system prompt, and anthropic_chat live in mcp_server/config.yml now
-      # (search_tools/anthropic_chat top-level keys), not here -- see that
-      # file. ANTHROPIC_API_KEY/CLAUDE_CODE_OAUTH_TOKEN/MODEL_INSTRUCT_EXTERNAL/
-      # MODEL_CHAT stay as env: the first two are credentials, the latter two
-      # are only read when actually selected (same override-before-validate
-      # pattern as the reranker's MODEL_RERANKER, see
-      # services/mcp_server/src/server.py).
-      #
-      # ANTHROPIC_API_KEY is only required (and only read by server.py) when
-      # backend.type is "anthropic_token" or anthropic_chat.auth is "token"
-      # -- leave it unset for anthropic_subscription/subscription-only
-      # setups. Deliberately NOT "${ANTHROPIC_API_KEY:-}" (which would set
-      # the container's env var to an empty string when unset on the host)
-      # -- the bare form below makes Compose omit the variable entirely from
-      # the container when it's unset on the host, instead of passing
-      # through an empty string. That distinction matters: the `anthropic`
-      # SDK's own credential resolution treats ANTHROPIC_API_KEY="" as an
-      # explicitly-set (if empty) credential, which would break anything
-      # else in the container relying on default SDK credential resolution
-      # (see libs/anthropic.py's build_client()).
+      # Pipeline tuning lives in mcp_server/config.yml, not here -- see that
+      # file and README's "Configuration"/"Claude subscription auth" sections.
+      # Bare (not "${VAR:-}") so Compose omits these entirely when unset on
+      # the host instead of passing through an empty string -- the
+      # `anthropic` SDK and `claude` CLI's own credential resolution each
+      # treat an empty string differently from the var being absent (see
+      # libs/anthropic.py's build_client() / libs/claude_cli.py).
       ANTHROPIC_API_KEY:
-      # CLAUDE_CODE_OAUTH_TOKEN: a long-lived token from `claude setup-token`
-      # (requires an active Claude subscription) -- picked up automatically
-      # by the `claude` CLI subprocess (src/libs/claude_cli.py) for
-      # backend.type: anthropic_subscription and/or anthropic_chat's
-      # auth: "subscription". Not read by server.py itself (see its
-      # comment); same bare-key omit-if-unset form as ANTHROPIC_API_KEY
-      # above, for the same reason -- and because the CLI's own credential
-      # resolution should see this var entirely absent, not empty, when
-      # unused. See README's "Claude subscription auth" section for setup.
       CLAUDE_CODE_OAUTH_TOKEN:
     volumes:
       - ./services/mcp_server/src:/app/src
@@ -452,14 +362,7 @@ services:
       qdrant:
         condition: service_healthy
 
-  # Observability stack. None of the services above are wired to emit
-  # OTLP yet -- this brings up the storage/collector/dashboard layer only
-  # (Tempo for trace history, Loki for log history -- retrieved chunks/
-  # answers -- Prometheus+Grafana for live cpu/mem/net and, once
-  # instrumented, app-level gauges).
-
-  # Trace store, local filesystem backend (services/observability/tempo.yaml)
-  # -- low trace volume for this stack doesn't need object storage/clustering.
+  # Observability stack -- see README's "Observability / monitoring" section.
   tempo:
     image: grafana/tempo:3.0.2
     container_name: rag-tempo
@@ -475,8 +378,6 @@ services:
     ports:
       - *tempo-port
 
-  # Log store (retrieved-chunk/answer payloads, correlated by trace_id),
-  # local filesystem backend (services/observability/loki-config.yaml).
   loki:
     image: grafana/loki:3.7.3
     container_name: rag-loki
@@ -492,10 +393,6 @@ services:
     ports:
       - *loki-port
 
-  # Receives OTLP (grpc :4317, http :4318) from instrumented services --
-  # see services/observability/otel-collector-config.yaml. Traces go to
-  # Tempo, logs go to Loki (native OTLP ingestion); metrics are exposed on
-  # :8889 for Prometheus to scrape.
   otel-collector:
     image: otel/opentelemetry-collector-contrib:0.156.0
     container_name: rag-otel-collector
@@ -545,8 +442,6 @@ services:
       node-exporter:
         condition: service_started
 
-  # Per-container CPU/mem/network. On Docker Desktop (macOS), stats come
-  # from the Linux VM cadvisor runs in, not the host OS directly.
   cadvisor:
     image: ghcr.io/google/cadvisor:v0.60.5
     container_name: rag-cadvisor
@@ -573,7 +468,6 @@ services:
       - /sys:/sys:ro
       - /var/lib/docker/:/var/lib/docker:ro
 
-  # Host-level CPU/mem/network/disk.
   node-exporter:
     image: prom/node-exporter:v1.12.1
     container_name: rag-node-exporter
