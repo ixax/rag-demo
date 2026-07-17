@@ -6,7 +6,7 @@ A standalone Docker Compose deployment of [Ollama](https://ollama.com/) and a cr
 
 ```bash
 cp .env.example .env   # set MODEL_EMBED and MODEL_RERANKER (ships a working default); MODEL_INSTRUCT_INTERNAL if you need local generation
-docker compose up -d --build
+make up
 docker compose logs -f ollama-pull   # watch the Ollama model pull -- can take minutes
 docker compose logs -f reranker      # watch it download MODEL_RERANKER on first request
 ```
@@ -14,7 +14,7 @@ docker compose logs -f reranker      # watch it download MODEL_RERANKER on first
 On a host with an NVIDIA GPU reachable from Docker (Windows + Docker Desktop/WSL2, or Linux with the NVIDIA Container Toolkit; not macOS -- no GPU passthrough into Docker containers there):
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build
+make up-gpu
 ```
 
 ## What's here
@@ -22,6 +22,7 @@ docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build
 - **`docker-compose.yml`** -- `ollama` (server, port `${OLLAMA_PORT:-11434}`), `ollama-pull` (one-shot job that pulls + warms `MODEL_EMBED`/`MODEL_INSTRUCT_INTERNAL`), and `reranker` (cross-encoder HTTP service, port `${RERANKER_PORT:-50051}`).
 - **`docker-compose.gpu.yml`** -- optional override reserving the host's NVIDIA GPU for `ollama`.
 - **`.env.example`** -- `MODEL_EMBED`/`MODEL_RERANKER` (required), everything else optional.
+- **`Makefile`** -- `make up`/`up-gpu`/`down`/`clean`/`restart`/`status`/`logs`/`pull` (see targets below).
 - **`ollama/`** -- `entrypoint.sh` (the `ollama-pull` script, bind-mounted).
 - **`reranker/`** -- `Dockerfile` (CPU-only torch build), `src/` (FastAPI app + `libs/`, including its own config loading/logging/tracing), `config.yml` (`max_length`, bind-mounted -- edit and restart, no rebuild needed).
 
@@ -43,15 +44,15 @@ Model names (`MODEL_EMBED`, `MODEL_INSTRUCT_INTERNAL`, `MODEL_RERANKER`) must ma
 ## Re-pulling / changing models
 
 ```bash
-docker compose run --rm ollama-pull   # after changing MODEL_EMBED/MODEL_INSTRUCT_INTERNAL
+make pull                             # after changing MODEL_EMBED/MODEL_INSTRUCT_INTERNAL
 docker compose up -d --build reranker # after changing MODEL_RERANKER
 ```
 
 ## Stopping / data
 
 ```bash
-docker compose down      # stop, keep pulled models and cached reranker weights
-docker compose down -v   # stop and delete both
+make down    # stop, keep pulled models and cached reranker weights
+make clean   # stop and delete both
 ```
 
 ## Troubleshooting
