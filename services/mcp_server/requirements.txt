@@ -2,11 +2,10 @@ mcp==1.28.1
 qdrant-client==1.10.0
 httpx==0.27.2
 uvicorn==0.34.0
-anthropic==0.116.0
 PyYAML==6.0.2
 environs==15.0.1
-# already a transitive dep of anthropic/mcp -- pinned explicitly since
-# server.py imports it directly (config.yml schema validation).
+# already a transitive dep of mcp -- pinned explicitly since server.py
+# imports it directly (config.yml schema validation).
 pydantic==2.13.4
 opentelemetry-sdk==1.38.0
 opentelemetry-exporter-otlp-proto-grpc==1.38.0

@@ -33,14 +33,13 @@ def generate(
         ],
         "stream": False,
     }
-    # Both optional/omitted by default so callers that don't pass them (or a
-    # generation_profiles entry without options/response_schema set) get
-    # Ollama's own defaults rather than this function injecting empty
-    # values. options -> sampler params (e.g. temperature, min_p).
-    # response_schema -> Ollama's structured-outputs "format" field, which
-    # constrains sampling to that JSON shape at the grammar level -- see
-    # config.yml's generation_profiles.local for why this profile uses it
-    # instead of a textual "reply in this format" instruction.
+    # Both optional/omitted by default so a caller that doesn't pass them
+    # (or a config.yml search_tools.generation without options/
+    # response_schema set) gets Ollama's own defaults rather than this
+    # function injecting empty values. options -> sampler params (e.g.
+    # temperature, min_p). response_schema -> Ollama's structured-outputs
+    # "format" field, which constrains sampling to that JSON shape at the
+    # grammar level instead of a textual "reply in this format" instruction.
     if options is not None:
         body["options"] = options
     if response_schema is not None:

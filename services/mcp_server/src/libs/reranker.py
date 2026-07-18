@@ -9,6 +9,10 @@ from __future__ import annotations
 import httpx
 from pydantic import BaseModel
 
+from _common.logging_config import get_logger
+
+logger = get_logger(__name__)
+
 
 class RerankerConfig(BaseModel):
     enabled: bool
@@ -32,4 +36,14 @@ class RerankerClient:
     def rerank(self, query: str, documents: list[str]) -> list[float]:
         resp = self._client.post("/rerank", json={"query": query, "documents": documents})
         resp.raise_for_status()
-        return resp.json()["scores"]
+        body = resp.json()
+        # model/duration_ms describe the reranker service's own inference
+        # call (which model actually served the request, its internal
+        # processing time) -- distinct from the "rerank" StepTimer entry in
+        # retrieval.py, which times the full round trip including network.
+        logger.info(
+            "rerank model=%s duration_ms=%s",
+            body.get("model"),
+            body.get("duration_ms"),
+        )
+        return body["scores"]

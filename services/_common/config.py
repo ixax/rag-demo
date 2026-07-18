@@ -25,9 +25,9 @@ ConfigT = TypeVar("ConfigT", bound=BaseModel)
 class RawConfig:
     """A config.yml, parsed but not yet validated. Split out from
     load_yaml_config so a service that needs to inject an env-sourced value
-    into the raw dict before validation (e.g. the reranker's MODEL_RERANKER
-    overriding the "model" key) has somewhere to do that -- see
-    reranker/src/server.py."""
+    into the raw dict before validation (e.g. mcp-server's OLLAMA_REASONING_MODEL
+    overriding search_tools.reasoning.model) has somewhere to do that -- see
+    mcp_server/src/server.py."""
 
     def __init__(self, raw: dict, path: Path) -> None:
         self.raw = raw

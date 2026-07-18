@@ -28,15 +28,15 @@ x-force-ingest: &force-ingest ${FORCE_INGEST:-false}
 # Internal (container-network) service URLs, composed once instead of
 # repeated as literals in every service that needs them.
 x-qdrant-url: &qdrant-url "http://qdrant:6333"
-# Ollama and the reranker both live outside this compose project now --
-# default to host.docker.internal, which resolves back
-# to the Docker host from inside a container on Docker Desktop (Mac/Windows)
-# out of the box; on Linux it needs each consuming service's `extra_hosts:
-# ["host.docker.internal:host-gateway"]` entry below (Docker Engine
-# 20.10+). Point OLLAMA_HOST/_PORT / RERANKER_HOST/_PORT (.env) at a
-# different host/port instead if either runs elsewhere.
-x-ollama-url: &ollama-url "http://${OLLAMA_HOST:-host.docker.internal}:${OLLAMA_PORT:-11434}"
-x-reranker-url: &reranker-url "http://${RERANKER_HOST:-host.docker.internal}:${RERANKER_PORT:-50051}"
+# Ollama and the reranker both live outside this compose project now.
+# OLLAMA_HOST/_PORT and RERANKER_HOST (.env) are required, no default --
+# host.docker.internal resolves back to the Docker host from inside a
+# container on Docker Desktop (Mac/Windows) out of the box, but on Linux it
+# needs each consuming service's `extra_hosts: ["host.docker.internal:
+# host-gateway"]` entry below (Docker Engine 20.10+) even when set to that
+# value explicitly.
+x-ollama-url: &ollama-url "http://${OLLAMA_HOST:?set OLLAMA_HOST, e.g. in a .env file next to docker-compose.yml}:${OLLAMA_PORT:?set OLLAMA_PORT, e.g. in a .env file next to docker-compose.yml}"
+x-reranker-url: &reranker-url "http://${RERANKER_HOST:?set RERANKER_HOST, e.g. in a .env file next to docker-compose.yml}:${RERANKER_PORT:-50051}"
 x-mcp-url: &mcp-url "http://mcp-server:8000/mcp"
 x-pipelines-url: &pipelines-url "http://open-webui-pipelines:9099"
 
@@ -44,10 +44,8 @@ x-pipelines-url: &pipelines-url "http://open-webui-pipelines:9099"
 x-otel-url: &otel-url "http://otel-collector:4317"
 
 x-qdrant-collection: &qdrant-collection ${QDRANT_COLLECTION:?set QDRANT_COLLECTION, e.g. in a .env file next to docker-compose.yml}
-x-model-embed: &model-embed ${MODEL_EMBED:?set MODEL_EMBED, e.g. in a .env file next to docker-compose.yml}
-x-model-instruct-internal: &model-instruct-internal "${MODEL_INSTRUCT_INTERNAL:-}"
-x-model-instruct-external: &model-instruct-external "${MODEL_INSTRUCT_EXTERNAL:-}"
-x-model-chat: &model-chat "${MODEL_CHAT:-}"
+x-embeddings-model: &embeddings-model ${OLLAMA_EMBEDDINGS_MODEL:?set OLLAMA_EMBEDDINGS_MODEL, e.g. in a .env file next to docker-compose.yml}
+x-reasoning-model: &reasoning-model "${OLLAMA_REASONING_MODEL:?OLLAMA_REASONING_MODEL is required}"
 x-pipelines-api-key: &pipelines-api-key "${PIPELINES_API_KEY:-0p3n-w3bu!}"
 x-log-level: &log-level "${LOG_LEVEL:-INFO}"
 
@@ -80,9 +78,10 @@ services:
     cpus: 0.75
     ports:
       - *open-webui-port
-    # Lets OLLAMA_BASE_URL's default (host.docker.internal) resolve on
-    # Linux, where it isn't automatically added like it is on Docker
-    # Desktop (Mac/Windows) -- see x-ollama-url above.
+    # Lets OLLAMA_BASE_URL resolve on Linux when OLLAMA_HOST is set to
+    # host.docker.internal (.env.example's shipped value) -- Linux doesn't
+    # add that mapping automatically like Docker Desktop (Mac/Windows) does.
+    # See x-ollama-url above.
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:
@@ -116,9 +115,8 @@ services:
       # model is currently selected in chat -- here, that's the RAG pipe,
       # which sends the meta-prompt through retrieval and predictably finds
       # no relevant chunks for e.g. "suggest 3 follow-up questions". There's
-      # no other model registered to redirect these to (anthropic_chat is an
-      # MCP-only tool, not a selectable Open WebUI model), so they're
-      # disabled outright instead.
+      # no other model registered to redirect these to, so they're disabled
+      # outright instead.
       ENABLE_TITLE_GENERATION: "false"
       ENABLE_TAGS_GENERATION: "false"
       ENABLE_FOLLOW_UP_GENERATION: "false"
@@ -189,7 +187,7 @@ services:
       QDRANT_URL: *qdrant-url
       QDRANT_COLLECTION: *qdrant-collection
       OLLAMA_BASE_URL: *ollama-url
-      MODEL_EMBED: *model-embed
+      OLLAMA_EMBEDDINGS_MODEL: *embeddings-model
       FORCE_INGEST: *force-ingest
       LOG_LEVEL: *log-level
       OTEL_EXPORTER_OTLP_ENDPOINT: *otel-url
@@ -233,24 +231,15 @@ services:
       QDRANT_URL: *qdrant-url
       QDRANT_COLLECTION: *qdrant-collection
       OLLAMA_BASE_URL: *ollama-url
-      MODEL_EMBED: *model-embed
-      MODEL_INSTRUCT_INTERNAL: *model-instruct-internal
-      MODEL_INSTRUCT_EXTERNAL: *model-instruct-external
-      MODEL_CHAT: *model-chat
+      OLLAMA_EMBEDDINGS_MODEL: *embeddings-model
+      OLLAMA_REASONING_MODEL: *reasoning-model
       MCP_HOST: *mcp-host
       MCP_PORT: *mcp-internal-port
       RERANKER_URL: *reranker-url
       LOG_LEVEL: *log-level
       OTEL_EXPORTER_OTLP_ENDPOINT: *otel-url
       # Pipeline tuning lives in mcp_server/config.yml, not here -- see that
-      # file and README's "Configuration"/"Claude subscription auth" sections.
-      # Bare (not "${VAR:-}") so Compose omits these entirely when unset on
-      # the host instead of passing through an empty string -- the
-      # `anthropic` SDK and `claude` CLI's own credential resolution each
-      # treat an empty string differently from the var being absent (see
-      # libs/anthropic.py's build_client() / libs/claude_cli.py).
-      ANTHROPIC_API_KEY:
-      CLAUDE_CODE_OAUTH_TOKEN:
+      # file and README's "Configuration" section.
     volumes:
       - ./services/mcp_server/src:/app/src
       - ./services/mcp_server/config.yml:/app/config.yml
@@ -268,9 +257,8 @@ services:
       start_period: 10s
     # No depends_on entry for ollama/reranker -- both live outside this
     # compose project entirely now, so compose can't express "wait for it"
-    # here; make sure they're up first when config.yml needs them
-    # (search_tools.backend.type: "ollama" / search_tools.reranker.enabled:
-    # true).
+    # here; make sure Ollama is up (reasoning always runs), and the reranker
+    # too when config.yml's search_tools.reranker.enabled: true.
     depends_on:
       qdrant:
         condition: service_healthy

@@ -66,7 +66,7 @@ env = Env()
 QDRANT_URL = env.str("QDRANT_URL")
 QDRANT_COLLECTION = env.str("QDRANT_COLLECTION")
 OLLAMA_BASE_URL = env.str("OLLAMA_BASE_URL")
-MODEL_EMBED = env.str("MODEL_EMBED")
+OLLAMA_EMBEDDINGS_MODEL = env.str("OLLAMA_EMBEDDINGS_MODEL")
 FORCE_INGEST = env.bool("FORCE_INGEST")
 
 configure_logging()
@@ -598,7 +598,7 @@ def _run_traced(run_span) -> int:
         manifest.pop(rel_path, None)
 
     ollama_client = build_client(OLLAMA_BASE_URL, OLLAMA_TIMEOUT)
-    embed_fn = functools.partial(embed_query, ollama_client, MODEL_EMBED)
+    embed_fn = functools.partial(embed_query, ollama_client, OLLAMA_EMBEDDINGS_MODEL)
     files_with_content = 0
     files_skipped_empty = 0
     total_chunks = 0

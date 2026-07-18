@@ -3,20 +3,6 @@ FROM python:3.12-slim
 WORKDIR /app
 ENV PYTHONUNBUFFERED=1
 
-# Node.js + the `claude` CLI (Claude Code) -- needed only for
-# search_tools.backend.type: anthropic_subscription and/or anthropic_chat's
-# auth: "subscription" (see src/libs/claude_cli.py's docstring for why
-# subscription-billed generation shells out to this instead of using the
-# Anthropic SDK). Installed unconditionally since config.yml is read at
-# container runtime, not image build time -- a token-only/ollama-only
-# deployment carries this image weight unused.
-RUN apt-get update && apt-get install -y --no-install-recommends curl gnupg \
-    && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
-    && apt-get install -y --no-install-recommends nodejs \
-    && npm install -g @anthropic-ai/claude-code \
-    && apt-get purge -y --auto-remove curl gnupg \
-    && rm -rf /var/lib/apt/lists/*
-
 COPY services/mcp_server/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 

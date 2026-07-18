@@ -19,10 +19,10 @@ You verify the local RAG stack actually works end-to-end. This is a cheap, mecha
    - `trace` contains `embed_query` and `qdrant_search` steps with positive `duration_ms`.
    - If `services/mcp_server/config.yml`'s `reranker.enabled` is `true`, `trace` also has a `rerank` step, and results have non-null `rerank_score`. If you don't know the current config value, just check: rerank step present <=> rerank_score present (they should agree either way).
 
-3. **Full pipeline (generation)** -- call `mcp__rag__answer_question` with the same or a similar query. Verify:
+3. **Full pipeline (generation)** -- call `mcp__rag__answer_question` with the same or a similar query. Generation always runs (no toggle to skip it). Verify:
    - `context` is non-empty (same shape as `search_documents`' `results`).
-   - `trace` has all the steps from step 2 plus `generate`, UNLESS `services/mcp_server/config.yml`'s `backend.type` is `""` (empty) -- in that case `answer` is `null` and there's no `generate` step, which is correct, not a failure.
-   - If generation ran: `answer` is non-empty text, and `reasoning`/`sources` are either populated or explicitly `null`/`[]` (never missing keys).
+   - `trace` has all the steps from step 2 plus `generate`.
+   - `answer` is non-empty text, and `reasoning`/`sources` are either populated or explicitly `null`/`[]` (never missing keys).
 
 4. **Reranker service directly (optional, only if step 2/3 shows rerank_score always null while config.yml says reranker.enabled: true)** -- that mismatch means the reranker HTTP service likely isn't reachable from mcp-server. Confirm `RERANKER_HOST`/`RERANKER_PORT` in this repo's `.env` actually point at where that service is listening; logs/state for the service itself live on its own deployment, outside this repo's reach.
 
@@ -33,7 +33,7 @@ End with a short pass/fail summary, one line per check:
 ```
 [PASS] qdrant/mcp-server containers healthy; ollama/reranker reachable at configured OLLAMA_HOST/RERANKER_HOST
 [PASS] search_documents: 3 results, trace has embed_query/qdrant_search/rerank
-[FAIL] answer_question: trace missing "generate" step, but backend.type is "ollama" (not empty) -- expected generation to run
+[FAIL] answer_question: trace missing "generate" step -- expected generation to run
 ```
 
 Don't editorialize or suggest fixes beyond stating what's wrong and where you saw it (log excerpt, field name, expected vs actual). If everything passes, say so in one line -- don't pad the report.
