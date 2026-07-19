@@ -46,3 +46,16 @@ upsert_batch_size: 64
 
 # Request timeout (seconds) for the AI gateway's /v1/embeddings call. Number > 0.
 embedding_timeout: 120
+
+# Page-level summary generation for the summary index -- one short
+# reasoning-backend call per new/changed non-empty page, using
+# AI_GATEWAY_REASONING_MODEL (same backend mcp-server's answer_question
+# uses). The summary is embedded and upserted into <QDRANT_COLLECTION>_summaries
+# alongside the page's normal chunks.
+summary:
+  system_prompt: |
+    Summarize this documentation page in 3-5 sentences, in the page's own
+    language. Cover what the page is about and its main points. Plain
+    prose, no headings, lists, or markers.
+  # Request timeout (seconds) for this call. Number > 0.
+  timeout: 120

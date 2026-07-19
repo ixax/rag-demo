@@ -50,6 +50,11 @@ search_tools:
     # returned by search_documents. This is the default; callers can still
     # override it per-call via the tool's `top_k` argument.
     top_k_rerank: 5
+    # null | integer > 0. Caps how many of the top_k_retrieve candidates may
+    # come from the same source_path before reranking -- keeps one large
+    # page from crowding out other relevant sources in the candidate pool.
+    # null disables the cap.
+    max_chunks_per_source: 3
 
   # Reasoning/generation backend for answer_question -- always
   # AI_GATEWAY_REASONING_MODEL via the AI gateway's /v1/chat/completions,
@@ -155,3 +160,77 @@ search_tools:
   # /v1/chat/completions). Number > 0. Separate from embedding_timeout
   # above, which is embeddings-only.
   generate_timeout: 300
+
+  # Fuzzy-corrects query tokens against vocab.json (built by ingest.py from
+  # indexed titles/headings/tags) before sparse vectorization -- sparse
+  # matching is exact-token, so a typo silently drops that token's
+  # contribution entirely. Pure local fuzzy match (rapidfuzz), no network
+  # call, so on by default.
+  typo_correction:
+    enabled: true
+    # Integer 0-100 (rapidfuzz ratio). A query token below this similarity
+    # to its closest vocab entry is left untouched rather than "corrected"
+    # to an unrelated but similarly-spelled word.
+    threshold: 85
+
+  # Appends known synonyms (services/mcp_server/synonyms.yml) of matched
+  # terms to the query before sparse vectorization, so the exact-token
+  # sparse branch also matches when the user's wording differs from the
+  # documentation's own terminology. Local lookup, no network call, so on
+  # by default.
+  synonym_expansion:
+    enabled: true
+
+  # Rephrases the query into a more formal, documentation-style query
+  # before embedding, using the same reasoning backend as answer_question's
+  # generation step (see libs/query_rewrite.py). Adds an extra LLM call +
+  # latency to every query -- opt-in, unlike
+  # typo_correction/synonym_expansion above which are local and on by
+  # default.
+  query_rewrite:
+    enabled: false
+    # Placeholder -- overwritten at startup from AI_GATEWAY_REASONING_MODEL,
+    # same as search_tools.reasoning.model above.
+    model: "$AI_GATEWAY_REASONING_MODEL"
+    system_prompt: |
+      Rewrite the user's question into a short, formal, documentation-style
+      search query in the same language. Keep it a query, not a full
+      sentence. Respond with only the rewritten query, nothing else.
+
+  # Classifies each query as "point" (a specific value/parameter/step) or
+  # "global" (a broad, whole-page/whole-topic overview) via cosine
+  # similarity to these reference examples, embedded once at startup (see
+  # libs/query_router.py). Logged/reported via
+  # the "route" trace step; doesn't change retrieval behavior on its own
+  # until the summary index consumes it.
+  router:
+    point_examples:
+      - "какой дефолт у параметра max_chars"
+      - "what is the default value of top_k_retrieve"
+      - "какой код ошибки означает отсутствие подключения"
+      - "where is the config file located"
+      - "какой флаг отключает reranker"
+      - "what port does mcp-server listen on"
+    global_examples:
+      - "как в целом настроить SSO"
+      - "расскажи про архитектуру модуля"
+      - "how does the ingest pipeline work overall"
+      - "explain how retrieval and reranking work together"
+      - "какие есть возможности у Unified Editor"
+      - "give me an overview of the DDS Converter"
+
+  # Page-level summary index (written by ingest.py into
+  # <QDRANT_COLLECTION>_summaries, one point per source page) -- queried in
+  # addition to normal chunk retrieval when router.classify() returns
+  # "global". limit is small: summaries are
+  # whole-page, so a handful already covers most of the corpus relevant to a
+  # broad question.
+  summary:
+    limit: 3
+    # Same placeholders as source_template above, minus {updated} (summaries
+    # aren't tied to a single chunk's lastmod).
+    source_template: |
+      <summary id="{id}" title="{title}" path="{path}">
+      {text}
+      </summary>
+

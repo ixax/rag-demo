@@ -1,0 +1,51 @@
+# Flat term -> [synonym, ...] map for query-side lexical expansion (see
+# services/mcp_server/src/libs/synonyms.py). Seeded manually from
+# ./content page titles/tags; grows over time from failed-query logs
+# once patterns emerge there.
+synonyms:
+  dds converter:
+    - dds-converter
+    - конвертер dds
+    - конвертер текстур
+  unified editor:
+    - ue
+    - юнифайд эдитор
+    - единый редактор
+  sequence editor:
+    - секвенс эдитор
+    - редактор последовательностей
+  tank editor:
+    - танк эдитор
+    - редактор танка
+  gpu particles editor:
+    - редактор частиц
+    - particles editor
+  armor occlusion validator:
+    - валидатор occlusion
+    - occlusion validator
+  customization mode:
+    - режим кастомизации
+    - customization
+  mirror customization slots:
+    - зеркальные слоты
+    - mirror slots
+  pages json:
+    - pages.json
+  api key:
+    - апи-ключ
+    - token
+    - токен доступа
+    - access token
+  authentication:
+    - аутентификация
+    - авторизация
+    - login
+    - логин
+  config:
+    - конфиг
+    - configuration
+    - конфигурация
+  error code:
+    - код ошибки
+    - error
+    - ошибка

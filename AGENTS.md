@@ -51,6 +51,7 @@ Don't write comparison/rationale prose in README/AGENTS/config comments (e.g. "c
 
 - Before running a verification, diagnostic, or eval-shaped task (static check, log/output inspection, e2e/quality check, benchmark), check `.claude/agents/` for one that already covers it and delegate to it, instead of running the equivalent commands directly in the main session -- this applies to any current or future agent in that directory, not just the ones named below.
 - Currently covered: static checks → `py-static-check`; stack smoke test → `rag-e2e-test`; RAG quality eval → `rag-golden-eval`; docs Q&A → `rag-content-qa`; embedding model benchmarking → `embed-model-bench`; verbose command output (log tails, builds, test runs, ingest runs, install output) → `diag-grep`.
+- `rag-e2e-test` is costly (multi-minute, real generation calls) -- only propose running it and wait for confirmation, never spawn it automatically, even after a docker-compose.yml/Dockerfile/config.yml change.
 - Launch multi-minute verification/eval agents with background execution; continue other work or respond to the user while they run instead of waiting idle.
 - Stop an in-flight background agent via TaskStop as soon as its output is known to be unneeded.
 - Before acting on a costly diagnosis (re-ingest, image rebuild), confirm it with one cheap targeted check (`curl`, `grep`, a single API call) first.

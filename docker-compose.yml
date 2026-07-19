@@ -121,7 +121,12 @@ services:
     volumes:
       - ./services/mcp_server/src:/app/src
       - ./services/mcp_server/config.yml:/app/config.yml
+      - ./services/mcp_server/synonyms.yml:/app/synonyms.yml
       - ./services/_common:/app/_common
+      # Read-only access to ingest's manifest volume, for vocab.json (typo
+      # correction's vocabulary, built by ingest.py). ingest owns
+      # writing this volume; mcp-server only ever reads from it.
+      - ingest_state:/state:ro
     healthcheck:
       # Raw TCP check, not curl -- curl isn't installed in this image (same
       # approach as qdrant's healthcheck above). Only confirms
@@ -267,6 +272,7 @@ services:
       AI_GATEWAY_AUTH_HEADER: *ai-gateway-auth-header
       AI_GATEWAY_AUTH_VALUE_TEMPLATE: *ai-gateway-auth-value-template
       AI_GATEWAY_EMBEDDINGS_MODEL: *embeddings-model
+      AI_GATEWAY_REASONING_MODEL: *reasoning-model
       FORCE_INGEST: *force-ingest
       LOG_LEVEL: *log-level
       OTEL_EXPORTER_OTLP_ENDPOINT: *otel-url

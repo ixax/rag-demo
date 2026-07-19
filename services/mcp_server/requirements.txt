@@ -10,3 +10,4 @@ pydantic==2.13.4
 opentelemetry-sdk==1.38.0
 opentelemetry-exporter-otlp-proto-grpc==1.38.0
 opentelemetry-instrumentation-httpx==0.59b0
+rapidfuzz==3.10.1

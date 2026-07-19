@@ -31,7 +31,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, cast
 
 import httpx
 import yaml
@@ -44,15 +44,21 @@ from qdrant_client.models import (
     FieldCondition,
     Filter,
     MatchValue,
+    Modifier,
     PayloadSchemaType,
     PointStruct,
+    SparseIndexParams,
+    SparseVectorParams,
     VectorParams,
 )
 
 from _common.config import load_yaml_config
 from _common.logging_config import configure_logging, get_logger
 from _common.clients.embedding_client import EmbeddingClient
+from _common.clients.reasoning_client import ReasoningClient
+from _common.sparse_vector import sparse_vector as compute_sparse_vector
 from _common.tracing import configure_tracing, get_tracer
+from _common.vocab import extract_terms, save_vocab
 
 # env.str(name)/env.bool(name) raise a clear environs.EnvError if the
 # variable is unset -- no hand-rolled _require_env needed (was copy-pasted
@@ -70,6 +76,9 @@ AI_GATEWAY_API_KEY = env.str("AI_GATEWAY_API_KEY")
 AI_GATEWAY_AUTH_HEADER = env.str("AI_GATEWAY_AUTH_HEADER")
 AI_GATEWAY_AUTH_VALUE_TEMPLATE = env.str("AI_GATEWAY_AUTH_VALUE_TEMPLATE")
 AI_GATEWAY_EMBEDDINGS_MODEL = env.str("AI_GATEWAY_EMBEDDINGS_MODEL")
+# Reasoning backend for the summary index -- same model/gateway
+# mcp-server's answer_question uses.
+AI_GATEWAY_REASONING_MODEL = env.str("AI_GATEWAY_REASONING_MODEL")
 FORCE_INGEST = env.bool("FORCE_INGEST")
 
 configure_logging()
@@ -97,11 +106,17 @@ class _ChunkingConfig(BaseModel):
     overlap_chars: int = Field(ge=0)
 
 
+class _SummaryConfig(BaseModel):
+    system_prompt: str
+    timeout: float = Field(gt=0)
+
+
 class IngestConfig(BaseModel):
     paths: _PathsConfig
     chunking: _ChunkingConfig
     upsert_batch_size: int = Field(gt=0)
     embedding_timeout: float = Field(gt=0)
+    summary: _SummaryConfig
 
 
 _config = load_yaml_config(Path("config.yml"), IngestConfig)
@@ -115,8 +130,20 @@ CHUNK_MIN_CHARS = _config.chunking.min_chars
 CHUNK_OVERLAP_CHARS = min(_config.chunking.overlap_chars, CHUNK_MAX_CHARS - 1)
 UPSERT_BATCH_SIZE = _config.upsert_batch_size
 EMBEDDING_TIMEOUT = _config.embedding_timeout
+SUMMARY_SYSTEM_PROMPT = _config.summary.system_prompt
+SUMMARY_TIMEOUT = _config.summary.timeout
+
+# Fixed suffix, not independently configurable -- mcp-server's retrieval
+# code (libs/retrieval.py's retrieve_summary) queries this exact name
+# alongside QDRANT_COLLECTION.
+QDRANT_SUMMARY_COLLECTION = f"{QDRANT_COLLECTION}_summaries"
 
 MANIFEST_PATH = STATE_DIR / "manifest.json"
+# vocab.json is the query-side typo-correction vocabulary mcp-server reads
+# (see services/mcp_server/src/libs/typo_correct.py) -- aggregated from every manifest entry's
+# "vocab_terms" at the end of each run, so it stays in sync with whatever's
+# actually indexed without a separate full-corpus scan.
+VOCAB_PATH = STATE_DIR / "vocab.json"
 
 # Filesystem lock so two `make ingest` / `make ingest-force` runs (each a
 # separate container sharing the STATE_DIR volume) can't clobber each other.
@@ -284,6 +311,11 @@ def clean_body(body: str, params: dict[str, Any]) -> str:
 class Section:
     heading: str | None
     text: str
+    level: int | None = None
+    # The enclosing ## heading, only set for ### sections -- carried into the
+    # chunk breadcrumb so a ### subsection under an unrelated-sounding parent
+    # (e.g. "Options" under "Conversion Modes") doesn't lose that context.
+    parent_heading: str | None = None
 
 
 def split_sections(clean_text: str) -> list[Section]:
@@ -295,14 +327,54 @@ def split_sections(clean_text: str) -> list[Section]:
     if intro:
         sections.append(Section(heading=None, text=intro))
 
+    current_h2: str | None = None
     for i, m in enumerate(matches):
+        level = len(m.group(1))
         heading = m.group(2).strip()
         start = m.end()
         end = matches[i + 1].start() if i + 1 < len(matches) else len(clean_text)
         body = clean_text[start:end].strip()
-        sections.append(Section(heading=heading, text=body))
+        parent_heading = current_h2 if level == 3 else None
+        sections.append(Section(heading=heading, text=body, level=level, parent_heading=parent_heading))
+        if level == 2:
+            current_h2 = heading
 
     return sections
+
+
+def _merge_short_sections(sections: list[Section]) -> list[Section]:
+    # A section shorter than CHUNK_MIN_CHARS carries too little text to
+    # stand alone (e.g. a heading followed by one short sentence before its
+    # own subsections) -- glue it onto the next sibling at the same heading
+    # level instead of silently dropping its content, falling back to the
+    # previous section when it's the last one on the page.
+    merged: list[Section] = []
+    i = 0
+    n = len(sections)
+    while i < n:
+        section = sections[i]
+        if len(section.text) < CHUNK_MIN_CHARS and n > 1:
+            nxt = sections[i + 1] if i + 1 < n else None
+            if nxt is not None and nxt.level == section.level:
+                combined = f"{section.text}\n\n{nxt.text}" if section.text else nxt.text
+                merged.append(
+                    Section(heading=nxt.heading, text=combined, level=nxt.level, parent_heading=nxt.parent_heading)
+                )
+                i += 2
+                continue
+            if merged:
+                prev = merged[-1]
+                merged[-1] = Section(
+                    heading=prev.heading,
+                    text=f"{prev.text}\n\n{section.text}" if section.text else prev.text,
+                    level=prev.level,
+                    parent_heading=prev.parent_heading,
+                )
+                i += 1
+                continue
+        merged.append(section)
+        i += 1
+    return merged
 
 
 def _pack(pieces: list[str], sep: str, max_chars: int, overlap: int = 0) -> list[str]:
@@ -329,10 +401,20 @@ def _hard_wrap(text: str, max_chars: int, overlap: int = 0) -> list[str]:
     return [text[i : i + max_chars] for i in range(0, len(text), step)]
 
 
-def _split_long_text(text: str, max_chars: int, overlap: int = 0) -> list[str]:
-    if len(text) <= max_chars:
-        return [text]
+CODE_FENCE_RE = re.compile(r"```.*?```", re.DOTALL)
 
+# Identifier-like tokens for the exact-match dictionary: CLI flags
+# (--foo-bar), and snake_case/kebab-case/dotted names
+# with at least one separator (config keys, method paths like Foo.bar) --
+# plain English words never match since they lack a '.', '_', or '-'.
+IDENTIFIER_RE = re.compile(r"--[A-Za-z][\w-]*|\b[A-Za-z_][A-Za-z0-9_]*(?:[._-][A-Za-z0-9_]+)+\b")
+
+
+def extract_identifiers(text: str) -> list[str]:
+    return sorted({m.group(0).lower() for m in IDENTIFIER_RE.finditer(text)})
+
+
+def _pack_prose(text: str, max_chars: int, overlap: int = 0) -> list[str]:
     result: list[str] = []
     for paragraph in _pack(re.split(r"\n{2,}", text), "\n\n", max_chars, overlap):
         if len(paragraph) <= max_chars:
@@ -348,26 +430,61 @@ def _split_long_text(text: str, max_chars: int, overlap: int = 0) -> list[str]:
     return result
 
 
+def _split_long_text(text: str, max_chars: int, overlap: int = 0) -> list[str]:
+    if len(text) <= max_chars:
+        return [text]
+
+    # Fenced code blocks (config snippets, method examples) must survive as
+    # a single unit even past max_chars -- splitting one mid-block makes
+    # both search and the generated answer incomplete for "what params does
+    # X take" / "example config for Y" style queries. Pull them out first so
+    # the paragraph-based splitter below (which would otherwise treat blank
+    # lines *inside* a code block as paragraph boundaries) never sees them;
+    # everything else is packed by paragraph, then line, then hard-wrapped
+    # as before. _pack never slices an individual oversized piece -- it just
+    # becomes its own chunk -- so a code block always comes out intact.
+    units: list[str] = []
+    pos = 0
+    for m in CODE_FENCE_RE.finditer(text):
+        prose_before = text[pos : m.start()]
+        if prose_before.strip():
+            units.extend(_pack_prose(prose_before, max_chars, overlap))
+        code_block = m.group().strip()
+        if code_block:
+            units.append(code_block)
+        pos = m.end()
+    trailing = text[pos:]
+    if trailing.strip():
+        units.extend(_pack_prose(trailing, max_chars, overlap))
+
+    if not units:
+        return [text]
+    return _pack(units, "\n\n", max_chars, overlap)
+
+
 @dataclass
 class Chunk:
     text: str
     heading: str | None
     chunk_index: int
+    heading_level: int | None = None
+    section_path: list[str] | None = None
+    chunk_type: str = "prose"
 
 
 def build_chunks(page: Page, clean_text: str, section_title: str | None = None) -> list[Chunk]:
     title = page.meta.get("title") or page.rel_path
     description = page.meta.get("description")
-    sections = split_sections(clean_text)
+    sections = _merge_short_sections(split_sections(clean_text))
 
-    raw_chunks: list[tuple[str | None, str]] = []
+    raw_chunks: list[tuple[Section, str]] = []
     for section in sections:
         if len(section.text) < CHUNK_MIN_CHARS:
             continue
         for piece in _split_long_text(section.text, CHUNK_MAX_CHARS, CHUNK_OVERLAP_CHARS):
             if len(piece) < CHUNK_MIN_CHARS:
                 continue
-            raw_chunks.append((section.heading, piece))
+            raw_chunks.append((section, piece))
 
     chunks: list[Chunk] = []
     idx = 0
@@ -384,8 +501,10 @@ def build_chunks(page: Page, clean_text: str, section_title: str | None = None) 
         chunks.append(Chunk(text=f"{breadcrumb}\n\n{description}", heading=None, chunk_index=idx))
         idx += 1
 
-    for heading, piece in raw_chunks:
-        breadcrumb = f"{title} > {heading}" if heading else str(title)
+    for section, piece in raw_chunks:
+        heading = section.heading
+        heading_path = [h for h in (section.parent_heading, heading) if h]
+        breadcrumb = f"{title} > {' > '.join(heading_path)}" if heading_path else str(title)
         # Pages under a section (e.g. ue/getting-started/installation) often
         # have a generic title ("Installation") that never mentions the
         # section's own name ("Unified Editor") -- without it, chunks whose
@@ -396,7 +515,18 @@ def build_chunks(page: Page, clean_text: str, section_title: str | None = None) 
         if section_title and section_title != title:
             breadcrumb = f"{section_title} — {breadcrumb}"
         embed_text = f"{breadcrumb}\n\n{piece}"
-        chunks.append(Chunk(text=embed_text, heading=heading, chunk_index=idx))
+        stripped = piece.strip()
+        chunk_type = "code" if stripped.startswith("```") and stripped.endswith("```") else "prose"
+        chunks.append(
+            Chunk(
+                text=embed_text,
+                heading=heading,
+                chunk_index=idx,
+                heading_level=section.level,
+                section_path=heading_path or None,
+                chunk_type=chunk_type,
+            )
+        )
         idx += 1
     return chunks
 
@@ -408,6 +538,26 @@ def build_chunks(page: Page, clean_text: str, section_title: str | None = None) 
 
 def point_id(rel_path: str, chunk_index: int) -> str:
     return str(uuid.uuid5(POINT_NAMESPACE, f"{rel_path}::{chunk_index}"))
+
+
+def summary_point_id(rel_path: str) -> str:
+    # One summary point per page (not per chunk), same namespace/uuid5
+    # scheme as point_id -- deterministic across runs.
+    return str(uuid.uuid5(POINT_NAMESPACE, f"{rel_path}::summary"))
+
+
+def generate_summary(reasoning_client: ReasoningClient, text: str) -> str:
+    """3-5 sentence page summary for the summary index. Best-effort: any
+    failure (timeout, gateway error) is logged as a
+    warning and returns "" so the caller skips upserting a stale/missing
+    summary rather than aborting the whole file's ingest over a non-essential
+    step."""
+    try:
+        result = reasoning_client.generate(AI_GATEWAY_REASONING_MODEL, SUMMARY_SYSTEM_PROMPT, text)
+    except Exception as exc:
+        logger.warning("summary generation failed: %s", exc)
+        return ""
+    return result.text.strip()
 
 
 def iter_content_files(root: Path):
@@ -434,21 +584,30 @@ def build_points(
     points: list[PointStruct] = []
     for chunk in chunks:
         vector = embed_fn(chunk.text)
+        sparse_vec = compute_sparse_vector(chunk.text)
         payload = {
             "text": chunk.text,
             "source_path": page.rel_path,
             "title": str(title),
             "heading": chunk.heading,
+            "heading_level": chunk.heading_level,
+            "section_path": chunk.section_path,
+            "chunk_type": chunk.chunk_type,
             "date": str(date) if date else None,
             "lastmod": str(lastmod) if lastmod else None,
             "weight": page.meta.get("weight"),
             "description": page.meta.get("description"),
             "tags": tags,
             "chunk_index": chunk.chunk_index,
+            # Always present (empty list if none/not a code chunk) so the
+            # payload index has a stable schema.
+            "identifiers": extract_identifiers(chunk.text) if chunk.chunk_type == "code" else [],
         }
         points.append(
             PointStruct(
-                id=point_id(page.rel_path, chunk.chunk_index), vector=vector, payload=payload
+                id=point_id(page.rel_path, chunk.chunk_index),
+                vector={"dense": vector, "sparse": sparse_vec},
+                payload=payload,
             )
         )
     return points
@@ -480,6 +639,21 @@ def save_manifest(path: Path, manifest: dict[str, Any]) -> None:
 def delete_points_for_path(qdrant: QdrantClient, rel_path: str) -> None:
     qdrant.delete(
         collection_name=QDRANT_COLLECTION,
+        points_selector=Filter(
+            must=[FieldCondition(key="source_path", match=MatchValue(value=rel_path))]
+        ),
+    )
+
+
+def delete_summary_for_path(qdrant: QdrantClient, rel_path: str) -> None:
+    # Guarded by collection_exists -- the summary collection may not exist
+    # yet (force rebuild, or a fresh volume before the first non-empty page
+    # is ingested), unlike the main collection which this function's sibling
+    # above assumes is already there.
+    if not qdrant.collection_exists(QDRANT_SUMMARY_COLLECTION):
+        return
+    qdrant.delete(
+        collection_name=QDRANT_SUMMARY_COLLECTION,
         points_selector=Filter(
             must=[FieldCondition(key="source_path", match=MatchValue(value=rel_path))]
         ),
@@ -598,6 +772,7 @@ def _run_traced(run_span) -> int:
     for rel_path in sorted(removed_paths):
         logger.info("  removing  %s", rel_path)
         delete_points_for_path(qdrant, rel_path)
+        delete_summary_for_path(qdrant, rel_path)
         manifest.pop(rel_path, None)
 
     embedding_client = EmbeddingClient(
@@ -609,6 +784,13 @@ def _run_traced(run_span) -> int:
         AI_GATEWAY_AUTH_VALUE_TEMPLATE,
     )
     embed_fn = embedding_client.embed_query
+    reasoning_client = ReasoningClient(
+        AI_GATEWAY_URL,
+        SUMMARY_TIMEOUT,
+        AI_GATEWAY_API_KEY,
+        AI_GATEWAY_AUTH_HEADER,
+        AI_GATEWAY_AUTH_VALUE_TEMPLATE,
+    )
     files_with_content = 0
     files_skipped_empty = 0
     files_failed = 0
@@ -623,6 +805,11 @@ def _run_traced(run_span) -> int:
     # the AI gateway times out on file 150/263) now keeps whatever was embedded and
     # upserted so far, rather than losing the entire run.
     collection_ready = not force
+    # Tracked separately from collection_ready: an existing deployment
+    # upgrading to the summary index has a main
+    # collection already but no summary collection yet, so this can't assume
+    # "not force" means "already exists" the way collection_ready does.
+    summary_collection_ready = not force and qdrant.collection_exists(QDRANT_SUMMARY_COLLECTION)
     pending_points: list[PointStruct] = []
 
     sorted_changed_paths = sorted(changed_paths)
@@ -633,6 +820,7 @@ def _run_traced(run_span) -> int:
             file_span.set_attribute("ingest.rel_path", rel_path)
             if not force:
                 delete_points_for_path(qdrant, rel_path)
+                delete_summary_for_path(qdrant, rel_path)
 
             page = load_page(files_by_rel[rel_path])
             if page.meta.get("draft") is True:
@@ -654,7 +842,23 @@ def _run_traced(run_span) -> int:
                     continue
             file_span.set_attribute("ingest.chunk_count", len(points))
 
-            manifest[rel_path] = {"hash": current_hashes[rel_path], "chunk_count": len(points)}
+            # vocab_terms: title/description/tags + every chunk's heading,
+            # for typo-correction's vocabulary (see VOCAB_PATH above). Kept
+            # per-manifest-entry (not recomputed globally) so an unchanged
+            # page's terms survive an incremental run without re-reading it.
+            vocab_terms = sorted(
+                extract_terms(
+                    page.meta.get("title"),
+                    page.meta.get("description"),
+                    *derive_tags(rel_path, page.meta),
+                    *(p.payload.get("heading") for p in points if p.payload),
+                )
+            )
+            manifest[rel_path] = {
+                "hash": current_hashes[rel_path],
+                "chunk_count": len(points),
+                "vocab_terms": vocab_terms,
+            }
 
             if not points:
                 files_skipped_empty += 1
@@ -666,7 +870,7 @@ def _run_traced(run_span) -> int:
             total_chunks += len(points)
 
             if not collection_ready:
-                vector_size = len(points[0].vector)
+                vector_size = len(cast(dict, points[0].vector)["dense"])
                 logger.info("recreating collection '%s' (size=%d)", QDRANT_COLLECTION, vector_size)
                 # recreate_collection is deprecated as of qdrant-client 1.10 --
                 # explicit delete (if present) + create is the replacement.
@@ -674,20 +878,86 @@ def _run_traced(run_span) -> int:
                     qdrant.delete_collection(QDRANT_COLLECTION)
                 qdrant.create_collection(
                     collection_name=QDRANT_COLLECTION,
-                    # float16 halves on-disk/in-memory vector size vs. the
-                    # float32 default, with no measurable precision loss for
-                    # cosine search.
-                    vectors_config=VectorParams(size=vector_size, distance=Distance.COSINE, datatype=Datatype.FLOAT16),
+                    # Named vectors: "dense" is the existing embedding search
+                    # (float16 halves on-disk/in-memory size vs. the float32
+                    # default, with no measurable precision loss for cosine
+                    # search); "sparse" is the term-frequency lexical vector
+                    # from compute_sparse_vector, for hybrid search.
+                    # Modifier.IDF makes Qdrant
+                    # compute and apply IDF server-side from the raw counts
+                    # ingest sends -- ingest itself doesn't do any manual IDF
+                    # weighting. Retrieval-side fusion (RRF) between dense and
+                    # sparse results is out of scope here (mcp_server's job);
+                    # this only makes the sparse vectors exist to fuse over.
+                    vectors_config={
+                        "dense": VectorParams(size=vector_size, distance=Distance.COSINE, datatype=Datatype.FLOAT16)
+                    },
+                    sparse_vectors_config={
+                        "sparse": SparseVectorParams(index=SparseIndexParams(), modifier=Modifier.IDF)
+                    },
                 )
                 # Created before points are upserted -- payload indexes created
                 # after HNSW is built don't get the extra filterable-vector-search
                 # links. Keyword (exact-match) indexes for the fields
                 # mcp-server's retrieve() can filter on (see libs/retrieval.py).
-                for field_name in ("title", "description", "source_path"):
+                for field_name in ("title", "description", "source_path", "tags", "identifiers"):
                     qdrant.create_payload_index(
                         collection_name=QDRANT_COLLECTION, field_name=field_name, field_schema=PayloadSchemaType.KEYWORD
                     )
                 collection_ready = True
+
+            # Page-level summary -- generated
+            # from the same cleaned body text the chunks came from, so it
+            # covers the whole page. Best-effort: generate_summary() returns
+            # "" on failure (logged there), in which case this page is left
+            # without a summary until a future run succeeds -- the stale
+            # summary was already deleted above, so this doesn't risk serving
+            # an outdated one.
+            summary_text = generate_summary(reasoning_client, clean_text)
+            if summary_text:
+                summary_vector = embed_fn(summary_text)
+                if not summary_collection_ready:
+                    # Tracked independently from collection_ready (main
+                    # collection) -- an existing deployment upgrading to this
+                    # feature has a main collection already but no summary
+                    # collection yet, so this can't just piggyback on the
+                    # main collection's own recreate-on-first-file trigger.
+                    logger.info(
+                        "recreating collection '%s' (size=%d)", QDRANT_SUMMARY_COLLECTION, len(summary_vector)
+                    )
+                    if qdrant.collection_exists(QDRANT_SUMMARY_COLLECTION):
+                        qdrant.delete_collection(QDRANT_SUMMARY_COLLECTION)
+                    qdrant.create_collection(
+                        collection_name=QDRANT_SUMMARY_COLLECTION,
+                        vectors_config=VectorParams(
+                            size=len(summary_vector), distance=Distance.COSINE, datatype=Datatype.FLOAT16
+                        ),
+                    )
+                    for field_name in ("title", "description", "source_path", "tags"):
+                        qdrant.create_payload_index(
+                            collection_name=QDRANT_SUMMARY_COLLECTION,
+                            field_name=field_name,
+                            field_schema=PayloadSchemaType.KEYWORD,
+                        )
+                    summary_collection_ready = True
+                qdrant.upsert(
+                    collection_name=QDRANT_SUMMARY_COLLECTION,
+                    points=[
+                        PointStruct(
+                            id=summary_point_id(rel_path),
+                            vector=summary_vector,
+                            payload={
+                                "title": str(page.meta.get("title") or rel_path),
+                                "description": page.meta.get("description"),
+                                "source_path": rel_path,
+                                "tags": derive_tags(rel_path, page.meta),
+                                "summary_text": summary_text,
+                            },
+                        )
+                    ],
+                )
+            else:
+                logger.warning("  %s no summary   %s", progress, rel_path)
 
             pending_points.extend(points)
             # Embedding (above) already happened; this chunk count is buffered in
@@ -714,6 +984,7 @@ def _run_traced(run_span) -> int:
             save_manifest(MANIFEST_PATH, manifest)
 
     embedding_client.close()
+    reasoning_client.close()
 
     if pending_points:
         remaining = len(pending_points)
@@ -726,6 +997,12 @@ def _run_traced(run_span) -> int:
         logger.info("no content to ingest (no non-empty pages found); leaving collection untouched")
 
     save_manifest(MANIFEST_PATH, manifest)
+
+    vocab: set[str] = set()
+    for entry in manifest.values():
+        vocab.update(entry.get("vocab_terms") or [])
+    save_vocab(VOCAB_PATH, vocab)
+    logger.info("wrote vocab.json with %d terms", len(vocab))
 
     run_span.set_attribute("ingest.files_with_content", files_with_content)
     run_span.set_attribute("ingest.total_chunks", total_chunks)

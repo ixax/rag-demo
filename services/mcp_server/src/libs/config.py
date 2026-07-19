@@ -46,6 +46,61 @@ class GenerationProfile(BaseModel):
     response_schema: dict | None = None
 
 
+class TypoCorrectionConfig(BaseModel):
+    """search_tools.typo_correction -- fuzzy-corrects query tokens against
+    vocab.json (built by ingest.py) before sparse vectorization. Pure local
+    fuzzy match, no network call, so on by default (see
+    libs/typo_correct.py)."""
+
+    enabled: bool = True
+    threshold: int = Field(default=85, ge=0, le=100)
+
+
+class SynonymExpansionConfig(BaseModel):
+    """search_tools.synonym_expansion -- appends known synonyms (see
+    synonyms.yml) of matched terms to the query before sparse vectorization.
+    Local lookup, no network call, so on by default (see
+    libs/synonyms.py)."""
+
+    enabled: bool = True
+
+
+class RouterConfig(BaseModel):
+    """search_tools.router -- hardcoded reference example questions for
+    query_router.QueryRouter's point-vs-global classification. Both empty
+    by default -- classify() then always returns "point" (no examples to
+    compare against), which is the same behavior as today until the
+    summary index actually branches on the result."""
+
+    point_examples: list[str] = Field(default_factory=list)
+    global_examples: list[str] = Field(default_factory=list)
+
+
+class QueryRewriteConfig(BaseModel):
+    """search_tools.query_rewrite -- rephrases the query into a more formal,
+    documentation-style query before embedding (see libs/query_rewrite.py).
+    Adds an extra LLM call + latency to every query, so opt-in (default
+    False), unlike typo_correction/synonym_expansion which are local and on
+    by default."""
+
+    enabled: bool = False
+    model: str = ""
+    system_prompt: str = ""
+
+
+class SummaryConfig(BaseModel):
+    """search_tools.summary -- page-level summary index (written by ingest.py
+    into <QDRANT_COLLECTION>_summaries) queried in addition to normal chunk
+    retrieval when query_router classifies a query as "global" (see
+    libs/query_router.py). `source_template`
+    mirrors the top-level source_template but for whole-page summaries
+    rather than chunk excerpts, so the generation prompt/LLM can tell them
+    apart."""
+
+    limit: int = Field(gt=0)
+    source_template: str
+
+
 class SearchToolsConfig(BaseModel):
     """Everything behind search_documents/answer_question -- retrieval,
     reranking, RAG-answer generation. Grouped under config.yml's
@@ -58,6 +113,11 @@ class SearchToolsConfig(BaseModel):
     source_template: str
     embedding_timeout: float = Field(gt=0)
     generate_timeout: float = Field(gt=0)
+    typo_correction: TypoCorrectionConfig = TypoCorrectionConfig()
+    synonym_expansion: SynonymExpansionConfig = SynonymExpansionConfig()
+    query_rewrite: QueryRewriteConfig = QueryRewriteConfig()
+    router: RouterConfig = RouterConfig()
+    summary: SummaryConfig
 
 
 class MCPServerConfig(BaseModel):
