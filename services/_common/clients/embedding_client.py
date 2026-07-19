@@ -25,6 +25,5 @@ class EmbeddingClient(AIGatewayClient):
         self._model = model
 
     def embed_query(self, query: str) -> list[float]:
-        resp = self._client.post("/v1/embeddings", json={"model": self._model, "input": query})
-        resp.raise_for_status()
+        resp = self._post_with_retry("/v1/embeddings", {"model": self._model, "input": query})
         return resp.json()["data"][0]["embedding"]

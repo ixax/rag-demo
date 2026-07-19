@@ -98,6 +98,19 @@ def configure_tracing(service_name: str) -> None:
         )
         logging.getLogger().addHandler(LoggingHandler(logger_provider=logger_provider))
 
+        # The OTLP gRPC exporter (shared by all three providers above) logs
+        # its own WARNING/ERROR lines every time a batch export fails --
+        # exactly what happens on every flush when otel-collector isn't up,
+        # since OTEL_EXPORTER_OTLP_ENDPOINT is set unconditionally in
+        # docker-compose regardless of whether the monitoring profile is
+        # running. That failure is already the best-effort, non-fatal case
+        # this module's docstring describes, so it isn't worth surfacing at
+        # WARNING/ERROR here -- silenced the same way httpx's own
+        # request-logging noise is in logging_config.py.
+        logging.getLogger("opentelemetry.exporter.otlp.proto.grpc.exporter").setLevel(
+            logging.CRITICAL
+        )
+
         # Optional: only mcp-server/ingest carry opentelemetry-instrumentation-
         # httpx (they make outbound calls -- to the reranker/AI gateway);
         # reranker itself has no outbound calls, so it doesn't install this

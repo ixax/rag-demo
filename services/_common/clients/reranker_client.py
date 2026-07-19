@@ -28,10 +28,9 @@ class RerankerClient(AIGatewayClient):
         self._model = model
 
     def rerank(self, query: str, documents: list[str]) -> list[float]:
-        resp = self._client.post(
-            "/rerank", json={"model": self._model, "query": query, "documents": documents}
+        resp = self._post_with_retry(
+            "/rerank", {"model": self._model, "query": query, "documents": documents}
         )
-        resp.raise_for_status()
         body = resp.json()
         logger.info("rerank model=%s id=%s", self._model, body.get("id"))
         # "results" isn't in input order and may omit low-scoring entries

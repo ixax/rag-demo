@@ -33,6 +33,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+import httpx
 import yaml
 from environs import Env
 from pydantic import BaseModel, Field
@@ -610,6 +611,7 @@ def _run_traced(run_span) -> int:
     embed_fn = embedding_client.embed_query
     files_with_content = 0
     files_skipped_empty = 0
+    files_failed = 0
     total_chunks = 0
     total_upserted = 0
     # False only in force mode, until the first non-empty file's points tell
@@ -640,7 +642,16 @@ def _run_traced(run_span) -> int:
                 clean_text = clean_body(page.body, params)
                 parts = Path(rel_path).parts
                 section_title = section_titles.get(parts[0]) if len(parts) > 1 else None
-                points = build_points(page, clean_text, embed_fn, section_title)
+                try:
+                    points = build_points(page, clean_text, embed_fn, section_title)
+                except httpx.HTTPStatusError as exc:
+                    # A gateway error on one file (e.g. a transient/model-
+                    # specific 400) shouldn't abort every other file's ingest --
+                    # skip it, and leave it out of the manifest so the next run
+                    # retries it instead of treating it as successfully ingested.
+                    files_failed += 1
+                    logger.error("  %s FAILED     %s: %s", progress, rel_path, exc)
+                    continue
             file_span.set_attribute("ingest.chunk_count", len(points))
 
             manifest[rel_path] = {"hash": current_hashes[rel_path], "chunk_count": len(points)}
@@ -718,13 +729,17 @@ def _run_traced(run_span) -> int:
 
     run_span.set_attribute("ingest.files_with_content", files_with_content)
     run_span.set_attribute("ingest.total_chunks", total_chunks)
+    run_span.set_attribute("ingest.files_failed", files_failed)
     logger.info(
-        "%d pages changed+ingested, %d changed pages now empty, %d removed, %d chunks embedded this run",
+        "%d pages changed+ingested, %d changed pages now empty, %d removed, %d failed, %d chunks embedded this run",
         files_with_content,
         files_skipped_empty,
         len(removed_paths),
+        files_failed,
         total_chunks,
     )
+    if files_failed:
+        logger.warning("%d file(s) failed to ingest and will be retried next run -- see FAILED lines above", files_failed)
     logger.info("done")
     return 0
 

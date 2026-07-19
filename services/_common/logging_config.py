@@ -28,6 +28,13 @@ def configure_logging() -> None:
         stream=sys.stderr,
         force=True,
     )
+    # httpx/httpcore log every request/response at INFO with no data worth
+    # keeping ("HTTP Request: POST ... 200 OK") -- our own clients
+    # (_common/clients/ai_gateway_client.py) log the same calls at DEBUG
+    # with actual content (path, model), so these are muted unconditionally
+    # rather than left to inherit LOG_LEVEL.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 
 def get_logger(name: str) -> logging.Logger:

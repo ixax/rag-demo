@@ -56,8 +56,7 @@ class ReasoningClient(AIGatewayClient):
                 "type": "json_schema",
                 "json_schema": {"name": "response", "schema": response_schema, "strict": True},
             }
-        resp = self._client.post("/v1/chat/completions", json=body)
-        resp.raise_for_status()
+        resp = self._post_with_retry("/v1/chat/completions", body)
         return GenerationResult(
             text=resp.json()["choices"][0]["message"]["content"], input_tokens=0, output_tokens=0
         )
