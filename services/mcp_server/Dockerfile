@@ -7,7 +7,7 @@ COPY services/mcp_server/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # _common/ lives at services/_common, shared with ingest and the reranker
-# service (config loading, Ollama embedding client) -- that's why this
+# service (config loading, AI gateway embedding client) -- that's why this
 # service builds from the repo root context (see docker-compose.yml's
 # `context: .` / `dockerfile: services/mcp_server/Dockerfile`) instead of
 # just ./services/mcp_server.

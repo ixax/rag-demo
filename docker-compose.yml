@@ -28,15 +28,21 @@ x-force-ingest: &force-ingest ${FORCE_INGEST:-false}
 # Internal (container-network) service URLs, composed once instead of
 # repeated as literals in every service that needs them.
 x-qdrant-url: &qdrant-url "http://qdrant:6333"
-# Ollama and the reranker both live outside this compose project now.
-# OLLAMA_HOST/_PORT and RERANKER_HOST (.env) are required, no default --
-# host.docker.internal resolves back to the Docker host from inside a
-# container on Docker Desktop (Mac/Windows) out of the box, but on Linux it
-# needs each consuming service's `extra_hosts: ["host.docker.internal:
-# host-gateway"]` entry below (Docker Engine 20.10+) even when set to that
-# value explicitly.
-x-ollama-url: &ollama-url "http://${OLLAMA_HOST:?set OLLAMA_HOST, e.g. in a .env file next to docker-compose.yml}:${OLLAMA_PORT:?set OLLAMA_PORT, e.g. in a .env file next to docker-compose.yml}"
-x-reranker-url: &reranker-url "http://${RERANKER_HOST:?set RERANKER_HOST, e.g. in a .env file next to docker-compose.yml}:${RERANKER_PORT:-50051}"
+# Reasoning, embeddings, and reranking are all served by one AI gateway
+# now, outside this compose project -- AI_GATEWAY_HOST/_PORT (.env) are
+# required/defaulted, no separate host/port pair per model. The gateway
+# exposes an OpenAI-compatible API for reasoning/embeddings and a
+# Cohere/HuggingFace-style /rerank endpoint for reranking (both routed by the
+# "model" field in each request body, see x-reasoning-model/x-embeddings-
+# model/x-reranker-model below) -- host.docker.internal resolves back to the
+# Docker host from inside a container on Docker Desktop (Mac/Windows) out of
+# the box, but on Linux it needs each consuming service's `extra_hosts:
+# ["host.docker.internal: host-gateway"]` entry below (Docker Engine 20.10+)
+# even when set to that value explicitly.
+x-ai-gateway-url: &ai-gateway-url "http://${AI_GATEWAY_HOST:?set AI_GATEWAY_HOST, e.g. in a .env file next to docker-compose.yml}:${AI_GATEWAY_PORT:-4000}"
+x-ai-gateway-api-key: &ai-gateway-api-key "${AI_GATEWAY_API_KEY:?set AI_GATEWAY_API_KEY, e.g. in a .env file next to docker-compose.yml}"
+x-ai-gateway-auth-header: &ai-gateway-auth-header "${AI_GATEWAY_AUTH_HEADER:?set AI_GATEWAY_AUTH_HEADER, e.g. in a .env file next to docker-compose.yml}"
+x-ai-gateway-auth-value-template: &ai-gateway-auth-value-template "${AI_GATEWAY_AUTH_VALUE_TEMPLATE:?set AI_GATEWAY_AUTH_VALUE_TEMPLATE, e.g. in a .env file next to docker-compose.yml}"
 x-mcp-url: &mcp-url "http://mcp-server:8000/mcp"
 x-pipelines-url: &pipelines-url "http://open-webui-pipelines:9099"
 
@@ -44,9 +50,10 @@ x-pipelines-url: &pipelines-url "http://open-webui-pipelines:9099"
 x-otel-url: &otel-url "http://otel-collector:4317"
 
 x-qdrant-collection: &qdrant-collection ${QDRANT_COLLECTION:?set QDRANT_COLLECTION, e.g. in a .env file next to docker-compose.yml}
-x-embeddings-model: &embeddings-model ${OLLAMA_EMBEDDINGS_MODEL:?set OLLAMA_EMBEDDINGS_MODEL, e.g. in a .env file next to docker-compose.yml}
-x-reasoning-model: &reasoning-model "${OLLAMA_REASONING_MODEL:?OLLAMA_REASONING_MODEL is required}"
-x-pipelines-api-key: &pipelines-api-key "${PIPELINES_API_KEY:-0p3n-w3bu!}"
+x-embeddings-model: &embeddings-model ${AI_GATEWAY_EMBEDDINGS_MODEL:?set AI_GATEWAY_EMBEDDINGS_MODEL, e.g. in a .env file next to docker-compose.yml}
+x-reasoning-model: &reasoning-model "${AI_GATEWAY_REASONING_MODEL:?AI_GATEWAY_REASONING_MODEL is required}"
+x-reranker-model: &reranker-model "${AI_GATEWAY_RERANKER_MODEL:?set AI_GATEWAY_RERANKER_MODEL, e.g. in a .env file next to docker-compose.yml}"
+x-pipelines-api-key: &pipelines-api-key "${PIPELINES_API_KEY:?set PIPELINES_API_KEY, e.g. in a .env file next to docker-compose.yml}"
 x-log-level: &log-level "${LOG_LEVEL:-INFO}"
 
 services:
@@ -69,7 +76,74 @@ services:
       retries: 10
       start_period: 10s
 
+  mcp-server:
+    build:
+      # Root context (not ./services/mcp_server) because the Dockerfile also
+      # needs /services/_common, shared with ingest (config loading, AI
+      # gateway client).
+      context: .
+      dockerfile: services/mcp_server/Dockerfile
+    container_name: rag-mcp-server
+    restart: unless-stopped
+    mem_limit: 512m
+    mem_reservation: 256m
+    cpus: 0.5
+    # Matches the Dockerfile CMD -- kept explicit here so it's an obvious,
+    # easy override point (e.g. append `--reload` for dev without editing
+    # the image), via `docker compose run --rm --service-ports mcp-server
+    # uvicorn src.server:app --host 0.0.0.0 --port 8000 --reload` or a
+    # docker-compose.override.yml. Host/port come from the same anchors as
+    # `ports.target` and MCP_HOST/MCP_PORT below.
+    command: ["uvicorn", "src.server:app", "--host", *mcp-host, "--port", *mcp-internal-port]
+    ports:
+      - target: *mcp-internal-port
+        published: *mcp-server-published-port
+        protocol: tcp
+    # See open-webui's extra_hosts above -- same reasoning.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      QDRANT_URL: *qdrant-url
+      QDRANT_COLLECTION: *qdrant-collection
+      AI_GATEWAY_URL: *ai-gateway-url
+      AI_GATEWAY_API_KEY: *ai-gateway-api-key
+      AI_GATEWAY_AUTH_HEADER: *ai-gateway-auth-header
+      AI_GATEWAY_AUTH_VALUE_TEMPLATE: *ai-gateway-auth-value-template
+      AI_GATEWAY_EMBEDDINGS_MODEL: *embeddings-model
+      AI_GATEWAY_REASONING_MODEL: *reasoning-model
+      MCP_HOST: *mcp-host
+      MCP_PORT: *mcp-internal-port
+      AI_GATEWAY_RERANKER_MODEL: *reranker-model
+      LOG_LEVEL: *log-level
+      OTEL_EXPORTER_OTLP_ENDPOINT: *otel-url
+      # Pipeline tuning lives in mcp_server/config.yml, not here -- see that
+      # file and README's "Configuration" section.
+    volumes:
+      - ./services/mcp_server/src:/app/src
+      - ./services/mcp_server/config.yml:/app/config.yml
+      - ./services/_common:/app/_common
+    healthcheck:
+      # Raw TCP check, not curl -- curl isn't installed in this image (same
+      # approach as qdrant's healthcheck above). Only confirms
+      # uvicorn is listening, not that a full MCP handshake succeeds -- this
+      # service's only route is streamable-http's /mcp, which needs the MCP
+      # protocol's own session negotiation rather than a bare GET/HEAD.
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/localhost/8000'"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    # No depends_on entry for the AI gateway -- it lives outside this
+    # compose project entirely, so compose can't express "wait for it" here;
+    # make sure it's up before starting (reasoning always runs; reranking
+    # too when config.yml's search_tools.reranker.enabled: true).
+    depends_on:
+      qdrant:
+        condition: service_healthy
+
   open-webui:
+    profiles:
+      - open-webui
     image: ghcr.io/open-webui/open-webui:main
     container_name: rag-open-webui
     restart: unless-stopped
@@ -78,10 +152,10 @@ services:
     cpus: 0.75
     ports:
       - *open-webui-port
-    # Lets OLLAMA_BASE_URL resolve on Linux when OLLAMA_HOST is set to
+    # Lets OLLAMA_BASE_URL resolve on Linux when AI_GATEWAY_HOST is set to
     # host.docker.internal (.env.example's shipped value) -- Linux doesn't
     # add that mapping automatically like Docker Desktop (Mac/Windows) does.
-    # See x-ollama-url above.
+    # See x-ai-gateway-url above.
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:
@@ -90,7 +164,7 @@ services:
       # own model picker, which only ever needs the pipelines-backed RAG
       # model below.
       ENABLE_OLLAMA_API: "false"
-      OLLAMA_BASE_URL: *ollama-url
+      OLLAMA_BASE_URL: *ai-gateway-url
       # Registers the pipelines service (below) as an OpenAI-compatible
       # connection, so its rag_pipeline.py shows up as its own selectable
       # model ("RAG (UE Docs)") in the chat model picker -- distinct from
@@ -134,6 +208,8 @@ services:
   # over MCP (streamable-http) -- no dependency on a chat model's
   # tool-calling.
   open-webui-pipelines:
+    profiles:
+      - open-webui
     build:
       # Own directory as context, not root -- unlike ingest/mcp-server,
       # this service doesn't use services/_common.
@@ -175,7 +251,7 @@ services:
     build:
       # Root context (not ./services/ingest) because the Dockerfile also
       # needs /services/_common, shared with mcp-server (config loading,
-      # Ollama embedding client).
+      # AI gateway embedding client).
       context: .
       dockerfile: services/ingest/Dockerfile
     container_name: rag-ingest
@@ -186,8 +262,11 @@ services:
     environment:
       QDRANT_URL: *qdrant-url
       QDRANT_COLLECTION: *qdrant-collection
-      OLLAMA_BASE_URL: *ollama-url
-      OLLAMA_EMBEDDINGS_MODEL: *embeddings-model
+      AI_GATEWAY_URL: *ai-gateway-url
+      AI_GATEWAY_API_KEY: *ai-gateway-api-key
+      AI_GATEWAY_AUTH_HEADER: *ai-gateway-auth-header
+      AI_GATEWAY_AUTH_VALUE_TEMPLATE: *ai-gateway-auth-value-template
+      AI_GATEWAY_EMBEDDINGS_MODEL: *embeddings-model
       FORCE_INGEST: *force-ingest
       LOG_LEVEL: *log-level
       OTEL_EXPORTER_OTLP_ENDPOINT: *otel-url
@@ -200,68 +279,6 @@ services:
       qdrant:
         condition: service_healthy
     restart: "no"
-
-  mcp-server:
-    build:
-      # Root context (not ./services/mcp_server) because the Dockerfile also
-      # needs /services/_common, shared with ingest (config loading, Ollama
-      # embedding client).
-      context: .
-      dockerfile: services/mcp_server/Dockerfile
-    container_name: rag-mcp-server
-    restart: unless-stopped
-    mem_limit: 512m
-    mem_reservation: 256m
-    cpus: 0.5
-    # Matches the Dockerfile CMD -- kept explicit here so it's an obvious,
-    # easy override point (e.g. append `--reload` for dev without editing
-    # the image), via `docker compose run --rm --service-ports mcp-server
-    # uvicorn src.server:app --host 0.0.0.0 --port 8000 --reload` or a
-    # docker-compose.override.yml. Host/port come from the same anchors as
-    # `ports.target` and MCP_HOST/MCP_PORT below.
-    command: ["uvicorn", "src.server:app", "--host", *mcp-host, "--port", *mcp-internal-port]
-    ports:
-      - target: *mcp-internal-port
-        published: *mcp-server-published-port
-        protocol: tcp
-    # See open-webui's extra_hosts above -- same reasoning.
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    environment:
-      QDRANT_URL: *qdrant-url
-      QDRANT_COLLECTION: *qdrant-collection
-      OLLAMA_BASE_URL: *ollama-url
-      OLLAMA_EMBEDDINGS_MODEL: *embeddings-model
-      OLLAMA_REASONING_MODEL: *reasoning-model
-      MCP_HOST: *mcp-host
-      MCP_PORT: *mcp-internal-port
-      RERANKER_URL: *reranker-url
-      LOG_LEVEL: *log-level
-      OTEL_EXPORTER_OTLP_ENDPOINT: *otel-url
-      # Pipeline tuning lives in mcp_server/config.yml, not here -- see that
-      # file and README's "Configuration" section.
-    volumes:
-      - ./services/mcp_server/src:/app/src
-      - ./services/mcp_server/config.yml:/app/config.yml
-      - ./services/_common:/app/_common
-    healthcheck:
-      # Raw TCP check, not curl -- curl isn't installed in this image (same
-      # approach as qdrant's healthcheck above). Only confirms
-      # uvicorn is listening, not that a full MCP handshake succeeds -- this
-      # service's only route is streamable-http's /mcp, which needs the MCP
-      # protocol's own session negotiation rather than a bare GET/HEAD.
-      test: ["CMD-SHELL", "bash -c '</dev/tcp/localhost/8000'"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-      start_period: 10s
-    # No depends_on entry for ollama/reranker -- both live outside this
-    # compose project entirely now, so compose can't express "wait for it"
-    # here; make sure Ollama is up (reasoning always runs), and the reranker
-    # too when config.yml's search_tools.reranker.enabled: true.
-    depends_on:
-      qdrant:
-        condition: service_healthy
 
   # Observability stack -- see README's "Observability / monitoring" section.
   tempo:

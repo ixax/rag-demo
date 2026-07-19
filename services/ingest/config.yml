@@ -44,5 +44,5 @@ chunking:
 # N/total" log line) and reduce memory spikes for very large collections.
 upsert_batch_size: 64
 
-# Request timeout (seconds) for calls to Ollama's /api/embeddings. Number > 0.
-ollama_timeout: 120
+# Request timeout (seconds) for the AI gateway's /v1/embeddings call. Number > 0.
+embedding_timeout: 120

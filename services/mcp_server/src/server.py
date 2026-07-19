@@ -2,37 +2,38 @@
 collection populated by ../ingest (services/ingest).
 
 Pipeline for both tools:
-  1. embed the query with OLLAMA_EMBEDDINGS_MODEL (same model used at ingest time,
+  1. embed the query with AI_GATEWAY_EMBEDDINGS_MODEL (same model used at ingest time,
      so query and document vectors live in the same space)
   2. fetch TOP_K_RETRIEVE nearest chunks from Qdrant
   3. rerank those candidates via an external reranker HTTP service this repo
      doesn't own, and keep the top TOP_K_RERANK -- skippable via
      config.yml's search_tools.reranker.enabled
   4. `answer_question` additionally feeds the reranked chunks as context to
-     the local OLLAMA_REASONING_MODEL via Ollama's /api/chat and returns its
-     generated answer. This step always runs for answer_question.
+     the AI_GATEWAY_REASONING_MODEL via the AI gateway's /v1/chat/completions
+     and returns its generated answer. This step always runs for
+     answer_question.
 
 Both search_documents/answer_question return structured JSON rather than
 plain text: the retrieved chunks (the local data the reasoning is grounded
 in), the reasoning itself (`answer_question` only -- see config.yml's
 search_tools.generation for the JSON-schema-constrained Reasoning/Answer/
-Sources contract Ollama's output follows), and a `trace` of pipeline steps
-with wall-clock timings. This is meant to be consumed by a thin presentation
-layer (e.g. a Haiku-model agent) rather than reasoned about further -- the
-reasoning already happened here.
+Sources contract the model's output follows), and a `trace` of pipeline
+steps with wall-clock timings. This is meant to be consumed by a thin
+presentation layer (e.g. a Haiku-model agent) rather than reasoned about
+further -- the reasoning already happened here.
 
 Exposed over streamable-http so it can be added as a remote MCP connector in
 both Open WebUI and Claude (Console / Desktop / claude.ai).
 
 This file is handlers + wiring only. Everything else -- config schema,
-retrieval, timing, answer parsing, and the Ollama backend calls -- lives in
-libs/. Env vars and config.yml are read *only* here; every libs/ function
-takes what it needs as arguments instead of reading globals itself.
+retrieval, timing, answer parsing, and the AI gateway client classes --
+lives in libs/ and _common/clients/. Env vars and config.yml are read
+*only* here; every libs/ function takes what it needs as arguments instead
+of reading globals itself.
 """
 
 from __future__ import annotations
 
-import functools
 from pathlib import Path
 
 from environs import Env
@@ -40,13 +41,13 @@ from mcp.server.fastmcp import FastMCP
 from opentelemetry.trace import format_trace_id
 from qdrant_client import QdrantClient
 
+from _common.clients.embedding_client import EmbeddingClient
+from _common.clients.reasoning_client import ReasoningClient
+from _common.clients.reranker_client import RerankerClient
 from _common.logging_config import configure_logging, get_logger
-from _common.ollama import build_client, embed_query
 from _common.tracing import OTEL_EXPORTER_OTLP_ENDPOINT, configure_tracing, get_meter, get_tracer
 
-from .libs import ollama as ollama_lib
 from .libs.config import MCPServerConfig, load_config, parse_structured_answer
-from .libs.reranker import RerankerClient
 from .libs.retrieval import retrieve
 from .libs.timer import StepTimer
 
@@ -59,13 +60,16 @@ raw_config = load_config(Path("config.yml"))
 
 QDRANT_URL = env.str("QDRANT_URL")
 QDRANT_COLLECTION = env.str("QDRANT_COLLECTION")
-OLLAMA_BASE_URL = env.str("OLLAMA_BASE_URL")
-OLLAMA_EMBEDDINGS_MODEL = env.str("OLLAMA_EMBEDDINGS_MODEL")
+AI_GATEWAY_URL = env.str("AI_GATEWAY_URL")
+AI_GATEWAY_API_KEY = env.str("AI_GATEWAY_API_KEY")
+AI_GATEWAY_AUTH_HEADER = env.str("AI_GATEWAY_AUTH_HEADER")
+AI_GATEWAY_AUTH_VALUE_TEMPLATE = env.str("AI_GATEWAY_AUTH_VALUE_TEMPLATE")
+AI_GATEWAY_EMBEDDINGS_MODEL = env.str("AI_GATEWAY_EMBEDDINGS_MODEL")
 MCP_HOST = env.str("MCP_HOST")
 MCP_PORT = env.int("MCP_PORT")
 # Reasoning/generation model for answer_question -- always required, since
 # generation always runs.
-OLLAMA_REASONING_MODEL = env.str("OLLAMA_REASONING_MODEL")
+AI_GATEWAY_REASONING_MODEL = env.str("AI_GATEWAY_REASONING_MODEL")
 
 configure_logging()
 logger = get_logger(__name__)
@@ -81,26 +85,50 @@ _requests_counter = get_meter(__name__).create_counter(
 # full field reference. It's bind-mounted alongside this package, so
 # editing it just needs a restart, not a rebuild.
 # search_tools.reasoning.model isn't meaningful in config.yml itself -- it
-# comes from OLLAMA_REASONING_MODEL, injected here before validating.
+# comes from AI_GATEWAY_REASONING_MODEL, injected here before validating.
 # load_config()/.validate() report/exit on a missing file or a schema
 # violation themselves, so there's nothing to catch here.
-raw_config.raw["search_tools"]["reasoning"]["model"] = OLLAMA_REASONING_MODEL
+raw_config.raw["search_tools"]["reasoning"]["model"] = AI_GATEWAY_REASONING_MODEL
 config: MCPServerConfig = raw_config.validate(MCPServerConfig)
 
-# RERANKER_URL (a full base URL, e.g. "http://reranker:50051") points at the
-# standalone reranker HTTP service -- only read when search_tools.reranker.enabled is
-# true in config.yml. The model/max_length that service runs live in *its
-# own* config.yml, not here.
-RERANKER_URL = env.str("RERANKER_URL") if config.search_tools.reranker.enabled else None
+# AI_GATEWAY_RERANKER_MODEL is the model alias that routes to the gateway's
+# actual reranker deployment -- only read when search_tools.reranker.enabled
+# is true in config.yml.
+AI_GATEWAY_RERANKER_MODEL = env.str("AI_GATEWAY_RERANKER_MODEL") if config.search_tools.reranker.enabled else None
 
-qdrant = QdrantClient(url=QDRANT_URL)
-ollama_client = build_client(OLLAMA_BASE_URL, config.search_tools.ollama_timeout)
-reranker_client = RerankerClient(RERANKER_URL) if RERANKER_URL else None
+qdrant_client = QdrantClient(url=QDRANT_URL)
+embedding_client = EmbeddingClient(
+    AI_GATEWAY_URL,
+    AI_GATEWAY_EMBEDDINGS_MODEL,
+    config.search_tools.embedding_timeout,
+    AI_GATEWAY_API_KEY,
+    AI_GATEWAY_AUTH_HEADER,
+    AI_GATEWAY_AUTH_VALUE_TEMPLATE,
+)
+reasoning_client = ReasoningClient(
+    AI_GATEWAY_URL,
+    config.search_tools.generate_timeout,
+    AI_GATEWAY_API_KEY,
+    AI_GATEWAY_AUTH_HEADER,
+    AI_GATEWAY_AUTH_VALUE_TEMPLATE,
+)
+reranker_client = (
+    RerankerClient(
+        AI_GATEWAY_URL,
+        AI_GATEWAY_RERANKER_MODEL,
+        config.search_tools.reranker.timeout,
+        AI_GATEWAY_API_KEY,
+        AI_GATEWAY_AUTH_HEADER,
+        AI_GATEWAY_AUTH_VALUE_TEMPLATE,
+    )
+    if AI_GATEWAY_RERANKER_MODEL
+    else None
+)
 
 # Bound once so handlers don't need to know which embedding provider is
-# configured -- currently always Ollama, but this is the seam if that ever
-# changes.
-_embed_fn = functools.partial(embed_query, ollama_client, OLLAMA_EMBEDDINGS_MODEL)
+# configured -- currently always the AI gateway, but this is the seam if
+# that ever changes.
+_embed_fn = embedding_client.embed_query
 
 mcp = FastMCP("rag", host=MCP_HOST, port=MCP_PORT)
 
@@ -145,7 +173,7 @@ def search_documents(
                 config.search_tools.retrieval.top_k_retrieve,
                 max(1, top_k),
                 timer,
-                qdrant=qdrant,
+                qdrant_client=qdrant_client,
                 collection=QDRANT_COLLECTION,
                 embed_fn=_embed_fn,
                 reranker_enabled=config.search_tools.reranker.enabled,
@@ -189,7 +217,7 @@ def answer_question(
     source_path: str | None = None,
 ) -> dict:
     """Answer a question by retrieving relevant chunks from the RAG knowledge
-    base, reranking them, and asking the local Ollama OLLAMA_REASONING_MODEL to
+    base, reranking them, and asking the AI_GATEWAY_REASONING_MODEL to
     compose an answer grounded in that context. Query can be in Russian or
     English; the answer is returned in the same language as the query.
 
@@ -235,7 +263,7 @@ def answer_question(
                 config.search_tools.retrieval.top_k_retrieve,
                 max(1, top_k),
                 timer,
-                qdrant=qdrant,
+                qdrant_client=qdrant_client,
                 collection=QDRANT_COLLECTION,
                 embed_fn=_embed_fn,
                 reranker_enabled=config.search_tools.reranker.enabled,
@@ -275,12 +303,10 @@ def answer_question(
 
         with timer("generate"):
             span.set_attribute("rag.model", config.search_tools.reasoning.model)
-            result = ollama_lib.generate(
-                ollama_client,
+            result = reasoning_client.generate(
                 config.search_tools.reasoning.model,
                 profile.system_prompt,
                 user_content,
-                config.search_tools.generate_timeout,
                 options=profile.options,
                 response_schema=profile.response_schema,
             )

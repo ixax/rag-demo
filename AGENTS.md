@@ -10,18 +10,20 @@ Current state: infra skeleton, ingestion pipeline, and a query-time MCP server a
 
 User-facing service list, ports, defaults, and make targets: see README's [Service links](./README.md#service-links), [Configuration](./README.md#configuration), and [Make targets](./README.md#make-targets) sections. This section only covers what isn't there — code layout and architecture.
 
-- `ollama` and `reranker` both live outside this repo's compose project entirely now, as an external deployment this repo doesn't own or manage. This repo sets `OLLAMA_HOST`/`OLLAMA_PORT`/`RERANKER_HOST` (`.env`, all required, no default) plus `RERANKER_PORT` (defaults to `50051`) to reach them.
-- `answer_question`'s generation step is Ollama-only: `OLLAMA_REASONING_MODEL` (required) uses `search_tools.generation` (`config.yml`) for its prompt/sampler options/response schema. Generation always runs -- there is no toggle to skip it.
+- Reasoning, embeddings, and reranking are all served by one external AI gateway this repo doesn't own or manage, reached via `AI_GATEWAY_HOST`/`AI_GATEWAY_PORT` (`.env`; host required, port defaults to the gateway's own default). `ingest`/`mcp-server` each read the resulting address as a single `AI_GATEWAY_URL` env var (see `docker-compose.yml`'s `x-ai-gateway-url` anchor) -- there is no separate URL per capability. The three concrete clients (`EmbeddingClient`, `ReasoningClient`, `RerankerClient`) share one base class, `AIGatewayClient` -- each in its own file under [`services/_common/clients/`](./services/_common/clients).
+- `answer_question`'s generation step uses `AI_GATEWAY_REASONING_MODEL` (required) with `search_tools.generation` (`config.yml`) for its prompt/sampler options/response schema. Generation always runs -- there is no toggle to skip it.
 - `pipelines` — [`services/open_webui_pipelines/rag_pipeline.py`](./services/open_webui_pipelines/rag_pipeline.py) is a plain MCP client (`mcp` package) against `mcp-server`'s `answer_question` tool, registered in Open WebUI as an OpenAI-compatible model.
 - `ingest` — see [`services/ingest/ingest.py`](./services/ingest/ingest.py) module docstring for the chunking/manifest design.
 - Observability stack — instrumentation lives in [`services/_common/tracing.py`](./services/_common/tracing.py); OTLP export is best-effort, core services don't depend on it.
-- `mcp-server` — see [`services/mcp_server/src/server.py`](./services/mcp_server/src/server.py) module docstring for the retrieve → rerank → generate pipeline. `server.py` is handlers + wiring only -- config schema, retrieval, timing, answer parsing, and the Ollama backend calls live in [`services/mcp_server/src/libs/`](./services/mcp_server/src/libs); those functions take what they need as arguments rather than reading env/config themselves.
+- `mcp-server` — see [`services/mcp_server/src/server.py`](./services/mcp_server/src/server.py) module docstring for the retrieve → rerank → generate pipeline. `server.py` is handlers + wiring only -- config schema, retrieval, and timing/answer-parsing helpers live in [`services/mcp_server/src/libs/`](./services/mcp_server/src/libs); the AI gateway client classes live in `_common/clients/` (shared with `ingest`). All of these take what they need as arguments rather than reading env/config themselves.
 
 ## Operating the stack
 
 See README's [Make targets](./README.md#make-targets), [Stopping the stack](./README.md#stopping-the-stack), and [Troubleshooting](./README.md#troubleshooting) sections for the operator-facing reference.
 
 Infra/credentials config lives in `.env` (gitignored; copy from `.env.example`). Pipeline tuning knobs (reranker, top-k, generation backend, chunking, etc.) live in `services/mcp_server/config.yml` and `services/ingest/config.yml` instead -- see README's Configuration section.
+
+When verifying `make ingest`/`make ingest-force` after a change, don't wait for the full ~260-file run -- stop as soon as the first chunks are upserted (first batch log line / points appearing in Qdrant). If incremental ingest (`FORCE_INGEST=false`) finds no changed files, it can legitimately exit almost immediately having ingested nothing -- call that out explicitly rather than treating it the same as a successful first-batch upsert.
 
 ## Dev-loop convention for ASGI/uvicorn services
 

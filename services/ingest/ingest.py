@@ -2,8 +2,8 @@
 
 Walks the content tree, parses Hugo front matter, strips Hugo shortcodes /
 raw HTML noise, chunks each page by section (## / ### headings), embeds
-each chunk with an Ollama embedding model, and upserts everything into a
-Qdrant collection.
+each chunk via the AI gateway's embedding model, and upserts everything into
+a Qdrant collection.
 
 Two modes, controlled by FORCE_INGEST:
 - FORCE_INGEST=true: full rebuild -- drop and recreate the collection from
@@ -21,7 +21,6 @@ the lock (see acquire_lock/release_lock).
 
 from __future__ import annotations
 
-import functools
 import hashlib
 import html
 import json
@@ -51,7 +50,7 @@ from qdrant_client.models import (
 
 from _common.config import load_yaml_config
 from _common.logging_config import configure_logging, get_logger
-from _common.ollama import build_client, embed_query
+from _common.clients.embedding_client import EmbeddingClient
 from _common.tracing import configure_tracing, get_tracer
 
 # env.str(name)/env.bool(name) raise a clear environs.EnvError if the
@@ -65,8 +64,11 @@ env = Env()
 # batch size) live in config.yml instead, see below.
 QDRANT_URL = env.str("QDRANT_URL")
 QDRANT_COLLECTION = env.str("QDRANT_COLLECTION")
-OLLAMA_BASE_URL = env.str("OLLAMA_BASE_URL")
-OLLAMA_EMBEDDINGS_MODEL = env.str("OLLAMA_EMBEDDINGS_MODEL")
+AI_GATEWAY_URL = env.str("AI_GATEWAY_URL")
+AI_GATEWAY_API_KEY = env.str("AI_GATEWAY_API_KEY")
+AI_GATEWAY_AUTH_HEADER = env.str("AI_GATEWAY_AUTH_HEADER")
+AI_GATEWAY_AUTH_VALUE_TEMPLATE = env.str("AI_GATEWAY_AUTH_VALUE_TEMPLATE")
+AI_GATEWAY_EMBEDDINGS_MODEL = env.str("AI_GATEWAY_EMBEDDINGS_MODEL")
 FORCE_INGEST = env.bool("FORCE_INGEST")
 
 configure_logging()
@@ -98,7 +100,7 @@ class IngestConfig(BaseModel):
     paths: _PathsConfig
     chunking: _ChunkingConfig
     upsert_batch_size: int = Field(gt=0)
-    ollama_timeout: float = Field(gt=0)
+    embedding_timeout: float = Field(gt=0)
 
 
 _config = load_yaml_config(Path("config.yml"), IngestConfig)
@@ -111,7 +113,7 @@ CHUNK_MIN_CHARS = _config.chunking.min_chars
 # "current" never shrink, growing every chunk to max_chars and looping.
 CHUNK_OVERLAP_CHARS = min(_config.chunking.overlap_chars, CHUNK_MAX_CHARS - 1)
 UPSERT_BATCH_SIZE = _config.upsert_batch_size
-OLLAMA_TIMEOUT = _config.ollama_timeout
+EMBEDDING_TIMEOUT = _config.embedding_timeout
 
 MANIFEST_PATH = STATE_DIR / "manifest.json"
 
@@ -597,8 +599,15 @@ def _run_traced(run_span) -> int:
         delete_points_for_path(qdrant, rel_path)
         manifest.pop(rel_path, None)
 
-    ollama_client = build_client(OLLAMA_BASE_URL, OLLAMA_TIMEOUT)
-    embed_fn = functools.partial(embed_query, ollama_client, OLLAMA_EMBEDDINGS_MODEL)
+    embedding_client = EmbeddingClient(
+        AI_GATEWAY_URL,
+        AI_GATEWAY_EMBEDDINGS_MODEL,
+        EMBEDDING_TIMEOUT,
+        AI_GATEWAY_API_KEY,
+        AI_GATEWAY_AUTH_HEADER,
+        AI_GATEWAY_AUTH_VALUE_TEMPLATE,
+    )
+    embed_fn = embedding_client.embed_query
     files_with_content = 0
     files_skipped_empty = 0
     total_chunks = 0
@@ -609,7 +618,7 @@ def _run_traced(run_span) -> int:
     # buffer flushed every UPSERT_BATCH_SIZE (and the manifest is saved after
     # every file), instead of the whole run's points sitting in memory until
     # one write at the very end -- a crash partway through a large run (e.g.
-    # Ollama times out on file 150/263) now keeps whatever was embedded and
+    # the AI gateway times out on file 150/263) now keeps whatever was embedded and
     # upserted so far, rather than losing the entire run.
     collection_ready = not force
     pending_points: list[PointStruct] = []
@@ -693,7 +702,7 @@ def _run_traced(run_span) -> int:
 
             save_manifest(MANIFEST_PATH, manifest)
 
-    ollama_client.close()
+    embedding_client.close()
 
     if pending_points:
         remaining = len(pending_points)

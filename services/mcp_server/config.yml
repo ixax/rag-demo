@@ -1,6 +1,6 @@
 # mcp-server runtime configuration
 #
-# Deployment/infra settings (Qdrant/Ollama URLs, ports, embedding model) stay
+# Deployment/infra settings (Qdrant/AI gateway URLs, ports, embedding model) stay
 # as environment variables in docker-compose.yml / .env -- this file is only
 # for things you'd want to tune without touching infra. Since
 # ./services/mcp_server is bind-mounted into the container, editing this file
@@ -32,6 +32,10 @@ search_tools:
     # disables this (all top_k_rerank chunks are kept regardless of score).
     # Ignored when enabled is false (no rerank_score to gate on).
     confidence_cutoff: 0.9
+    # Request timeout (seconds) for the reranker service's /rerank call.
+    # Number > 0. Reranker inference can take a while, especially on a cold
+    # model load, a loaded host, or a larger top_k_retrieve candidate batch.
+    timeout: 120
 
   # How many chunks to pull and keep at each retrieval stage.
   retrieval:
@@ -47,21 +51,23 @@ search_tools:
     # override it per-call via the tool's `top_k` argument.
     top_k_rerank: 5
 
-  # Reasoning/generation backend for answer_question -- always the local
-  # OLLAMA_REASONING_MODEL via Ollama's /api/chat, reached at
-  # OLLAMA_HOST/OLLAMA_PORT like the embedding model. search_documents never
-  # generates (retrieval-only), so this doesn't affect it. Always runs for
-  # answer_question -- there is no toggle to skip it.
+  # Reasoning/generation backend for answer_question -- always
+  # AI_GATEWAY_REASONING_MODEL via the AI gateway's /v1/chat/completions,
+  # reached at AI_GATEWAY_HOST/AI_GATEWAY_PORT like the embedding model.
+  # search_documents never generates (retrieval-only), so this doesn't
+  # affect it. Always runs for answer_question -- there is no toggle to skip
+  # it.
   reasoning:
-    # Placeholder -- overwritten at startup from OLLAMA_REASONING_MODEL (see
+    # Placeholder -- overwritten at startup from AI_GATEWAY_REASONING_MODEL (see
     # server.py). Whatever is written here is ignored.
-    model: "$OLLAMA_REASONING_MODEL"
+    model: "$AI_GATEWAY_REASONING_MODEL"
 
-  # Generation prompt/params for the local Ollama model (open-weight models
-  # run locally -- e.g. gemma3:4b, llama3.2:3b, qwen3). Short, literal
-  # instructions plus JSON-schema-constrained output (response_schema below,
-  # sent as Ollama's `format` field) instead of a textual "reply in this
-  # shape" instruction -- small local models don't reliably follow textual
+  # Generation prompt/params for the local model behind the AI gateway
+  # (open-weight models run locally -- e.g. gemma3:4b, llama3.2:3b, qwen3).
+  # Short, literal instructions plus JSON-schema-constrained output
+  # (response_schema below, sent as OpenAI's response_format.json_schema)
+  # instead of a textual "reply in this shape" instruction -- small local
+  # models don't reliably follow textual
   # format instructions, but schema-constrained sampling enforces the shape
   # regardless of the model's chat template (e.g. Gemma has no native system
   # role; a template mismatch degrades quality silently rather than
@@ -95,15 +101,17 @@ search_tools:
 
       Question: {query}
 
-    # Sampler options passed through to Ollama's /api/chat as "options".
-    # temperature 0-0.3 + min_p (not top_p) is the recommended combo for
+    # Sampler options, sent as top-level fields on the OpenAI-compatible
+    # /v1/chat/completions request (the gateway forwards unrecognized
+    # fields straight through to the backing model). temperature 0-0.3 +
+    # min_p (not top_p) is the recommended combo for
     # local models on extraction/classification-shaped tasks, which is
-    # what answer_question is -- see libs/ollama.py's generate().
+    # what answer_question is -- see _common/clients/reasoning_client.py's generate().
     options:
       temperature: 0.2
       min_p: 0.05
 
-    # JSON Schema sent as Ollama's "format" field -- constrains sampling
+    # JSON Schema sent as response_format.json_schema.schema -- constrains sampling
     # to this shape (grammar-level, not a textual instruction). Mirrors
     # the reasoning/answer/sources fields the system_prompt above
     # describes. additionalProperties: false keeps the constrained
@@ -139,10 +147,11 @@ search_tools:
     {text}
     </source>
 
-  # Request timeout (seconds) for calls to Ollama's /api/embeddings (query
-  # embedding). Number > 0. Does not apply to generation.
-  ollama_timeout: 120
+  # Request timeout (seconds) for the query-embedding call (AI gateway's
+  # /v1/embeddings). Number > 0. Does not apply to generation.
+  embedding_timeout: 120
 
-  # Request timeout (seconds) for the "generate" step -- Ollama's /api/chat.
-  # Number > 0. Separate from ollama_timeout above, which is embeddings-only.
+  # Request timeout (seconds) for the "generate" step (AI gateway's
+  # /v1/chat/completions). Number > 0. Separate from embedding_timeout
+  # above, which is embeddings-only.
   generate_timeout: 300

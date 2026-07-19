@@ -29,15 +29,24 @@ from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
 OTEL_EXPORTER_OTLP_ENDPOINT = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "")
 
+# Bounds every OTLP export call (periodic and the one each SDK provider makes
+# from its own atexit shutdown hook) to a few seconds. Without this, the
+# exporters' default ~10-30s timeout -- times three providers (traces,
+# metrics, logs) -- turns "otel-collector isn't up" into a multi-minute hang
+# on process exit, most visible in the one-shot ingest job which otherwise
+# finishes in seconds. See configure_tracing()'s docstring: this must stay a
+# bounded best-effort attempt, never something a consumer can get stuck on.
+OTEL_EXPORT_TIMEOUT_SECONDS = int(os.environ.get("OTEL_EXPORT_TIMEOUT_SECONDS", "3"))
+
 _configured = False
 
 
 def configure_tracing(service_name: str) -> None:
     """Wires up trace/metric/log export to OTEL_EXPORTER_OTLP_ENDPOINT
     (otel-collector's OTLP gRPC port) and instruments every httpx client in
-    this process (mcp-server's calls to the reranker/Ollama, ingest's calls
-    to Ollama) so outbound requests carry W3C trace-context headers and get
-    their own child spans for free.
+    this process (mcp-server's calls to the reranker/AI gateway, ingest's
+    calls to the AI gateway) so outbound requests carry W3C trace-context
+    headers and get their own child spans for free.
 
     Also attaches an OTLP LoggingHandler to the root logger -- every
     existing logger.info/.error call (via _common.logging_config) then
@@ -53,34 +62,56 @@ def configure_tracing(service_name: str) -> None:
         return
     _configured = True
 
-    resource = Resource.create({"service.name": service_name})
-
-    tracer_provider = TracerProvider(resource=resource)
-    tracer_provider.add_span_processor(
-        BatchSpanProcessor(OTLPSpanExporter(endpoint=OTEL_EXPORTER_OTLP_ENDPOINT, insecure=True))
-    )
-    trace.set_tracer_provider(tracer_provider)
-
-    reader = PeriodicExportingMetricReader(
-        OTLPMetricExporter(endpoint=OTEL_EXPORTER_OTLP_ENDPOINT, insecure=True)
-    )
-    metrics.set_meter_provider(MeterProvider(resource=resource, metric_readers=[reader]))
-
-    logger_provider = LoggerProvider(resource=resource)
-    logger_provider.add_log_record_processor(
-        BatchLogRecordProcessor(OTLPLogExporter(endpoint=OTEL_EXPORTER_OTLP_ENDPOINT, insecure=True))
-    )
-    logging.getLogger().addHandler(LoggingHandler(logger_provider=logger_provider))
-
-    # Optional: only mcp-server/ingest carry opentelemetry-instrumentation-
-    # httpx (they make outbound calls -- to the reranker/Ollama); reranker
-    # itself has no outbound calls, so it doesn't install this package.
     try:
-        from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
-    except ImportError:
-        pass
-    else:
-        HTTPXClientInstrumentor().instrument()
+        resource = Resource.create({"service.name": service_name})
+
+        tracer_provider = TracerProvider(resource=resource)
+        tracer_provider.add_span_processor(
+            BatchSpanProcessor(
+                OTLPSpanExporter(
+                    endpoint=OTEL_EXPORTER_OTLP_ENDPOINT,
+                    insecure=True,
+                    timeout=OTEL_EXPORT_TIMEOUT_SECONDS,
+                )
+            )
+        )
+        trace.set_tracer_provider(tracer_provider)
+
+        reader = PeriodicExportingMetricReader(
+            OTLPMetricExporter(
+                endpoint=OTEL_EXPORTER_OTLP_ENDPOINT,
+                insecure=True,
+                timeout=OTEL_EXPORT_TIMEOUT_SECONDS,
+            )
+        )
+        metrics.set_meter_provider(MeterProvider(resource=resource, metric_readers=[reader]))
+
+        logger_provider = LoggerProvider(resource=resource)
+        logger_provider.add_log_record_processor(
+            BatchLogRecordProcessor(
+                OTLPLogExporter(
+                    endpoint=OTEL_EXPORTER_OTLP_ENDPOINT,
+                    insecure=True,
+                    timeout=OTEL_EXPORT_TIMEOUT_SECONDS,
+                )
+            )
+        )
+        logging.getLogger().addHandler(LoggingHandler(logger_provider=logger_provider))
+
+        # Optional: only mcp-server/ingest carry opentelemetry-instrumentation-
+        # httpx (they make outbound calls -- to the reranker/AI gateway);
+        # reranker itself has no outbound calls, so it doesn't install this
+        # package.
+        try:
+            from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
+        except ImportError:
+            pass
+        else:
+            HTTPXClientInstrumentor().instrument()
+    except Exception:
+        logging.getLogger(__name__).warning(
+            "configure_tracing(%r) failed; continuing without export", service_name, exc_info=True
+        )
 
 
 def get_tracer(name: str) -> trace.Tracer:

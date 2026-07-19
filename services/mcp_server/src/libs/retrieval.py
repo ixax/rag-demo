@@ -28,7 +28,7 @@ def retrieve(
     top_k_rerank: int,
     timer: StepTimer,
     *,
-    qdrant: QdrantClient,
+    qdrant_client: QdrantClient,
     collection: str,
     embed_fn: Callable[[str], list[float]],
     reranker_enabled: bool,
@@ -73,7 +73,7 @@ def retrieve(
     query_filter = Filter(must=conditions) if conditions else None  # type: ignore[arg-type]
 
     with timer("qdrant_search"):
-        hits = qdrant.search(
+        hits = qdrant_client.search(
             collection_name=collection, query_vector=vector, query_filter=query_filter, limit=top_k_retrieve
         )
     if not hits:
