@@ -46,3 +46,16 @@ No `git commit`, `push`, `pull`, `merge`, `rebase`, or any other git operation t
 ## Docs conventions
 
 Don't write comparison/rationale prose in README/AGENTS/config comments (e.g. "chosen over X because Y", "Z was dropped since..."). State the current facts/config only -- no justification for alternatives not taken.
+
+## Token-saving conventions
+
+- Before running a verification, diagnostic, or eval-shaped task (static check, log/output inspection, e2e/quality check, benchmark), check `.claude/agents/` for one that already covers it and delegate to it, instead of running the equivalent commands directly in the main session -- this applies to any current or future agent in that directory, not just the ones named below.
+- Currently covered: static checks → `py-static-check`; stack smoke test → `rag-e2e-test`; RAG quality eval → `rag-golden-eval`; docs Q&A → `rag-content-qa`; embedding model benchmarking → `embed-model-bench`; verbose command output (log tails, builds, test runs, ingest runs, install output) → `diag-grep`.
+- Launch multi-minute verification/eval agents with background execution; continue other work or respond to the user while they run instead of waiting idle.
+- Stop an in-flight background agent via TaskStop as soon as its output is known to be unneeded.
+- Before acting on a costly diagnosis (re-ingest, image rebuild), confirm it with one cheap targeted check (`curl`, `grep`, a single API call) first.
+- Pass every file needing a static check to one `py-static-check` call in a single batch; after a fix, re-check only the file that changed.
+- Reuse code/docs already read earlier in the same session instead of re-spawning Explore/Plan agents for material already in context.
+- Resume a blocked background agent via SendMessage instead of stopping and respawning it, when the fix that unblocked it doesn't change its task.
+- Use `grep -n` for a single-value lookup (a version, a constant, a config value) in a large file instead of Read.
+- Use Edit, not Write, for changes to existing files.

@@ -11,7 +11,7 @@ You verify the local RAG stack actually works end-to-end. This is a cheap, mecha
 
 ## Checklist
 
-1. **Container health.** Run `make status` (or `docker compose ps` + the health checks in the Makefile if `make` isn't available) for this repo's own stack -- confirm `qdrant` and `mcp-server` show healthy/responding. Ollama and the reranker are a separate, externally managed deployment this repo doesn't own -- check reachability only, not container state: `curl -sf http://${OLLAMA_HOST:-host.docker.internal}:${OLLAMA_PORT:-11434}/api/tags`, and for the reranker (whose `/rerank` route won't necessarily be GET-able) a plain TCP/HTTP reachability check against `RERANKER_HOST`/`RERANKER_PORT`. If any of the four isn't reachable, stop here and report which one -- don't proceed to MCP calls against a dead stack.
+1. **Container health.** Run `make status` (or `docker compose ps` + the health checks in the Makefile if `make` isn't available) for this repo's own stack -- confirm `qdrant` and `mcp-server` show healthy/responding. Then run `docker compose exec -T mcp-server python3 - < scripts/health_check.py` to confirm Qdrant and the AI gateway (reasoning/embeddings/reranking are all served by this one gateway, reached via `AI_GATEWAY_HOST`/`AI_GATEWAY_PORT`) are both reachable. If any of these checks fails, stop here and report which dependency is down -- don't proceed to MCP calls against a dead stack.
 
 2. **Retrieval only** -- call `mcp__rag__search_documents` with a query you're confident matches indexed content (e.g. "DDS Converter" or "Unified Editor installation" -- see `./content` topics if unsure: asset-pipeline, dds-converter, engineering, ue, updates). Verify:
    - `results` is non-empty.
@@ -24,7 +24,7 @@ You verify the local RAG stack actually works end-to-end. This is a cheap, mecha
    - `trace` has all the steps from step 2 plus `generate`.
    - `answer` is non-empty text, and `reasoning`/`sources` are either populated or explicitly `null`/`[]` (never missing keys).
 
-4. **Reranker service directly (optional, only if step 2/3 shows rerank_score always null while config.yml says reranker.enabled: true)** -- that mismatch means the reranker HTTP service likely isn't reachable from mcp-server. Confirm `RERANKER_HOST`/`RERANKER_PORT` in this repo's `.env` actually point at where that service is listening; logs/state for the service itself live on its own deployment, outside this repo's reach.
+4. **Reranker service directly (optional, only if step 2/3 shows rerank_score always null while config.yml says reranker.enabled: true)** -- that mismatch means the AI gateway's `/rerank` route likely isn't reachable from mcp-server. Confirm `AI_GATEWAY_HOST`/`AI_GATEWAY_PORT` in this repo's `.env` actually point at where the gateway is listening; logs/state for the gateway itself live on its own deployment, outside this repo's reach.
 
 ## Reporting
 
