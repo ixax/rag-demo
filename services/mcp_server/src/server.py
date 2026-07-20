@@ -73,7 +73,7 @@ QDRANT_COLLECTION = env.str("QDRANT_COLLECTION")
 # summary index under this exact name alongside the main collection.
 QDRANT_SUMMARY_COLLECTION = f"{QDRANT_COLLECTION}_summaries"
 AI_GATEWAY_URL = env.str("AI_GATEWAY_URL")
-AI_GATEWAY_API_KEY = env.str("AI_GATEWAY_API_KEY")
+AI_GATEWAY_AUTH_KEY = env.str("AI_GATEWAY_AUTH_KEY")
 AI_GATEWAY_AUTH_HEADER = env.str("AI_GATEWAY_AUTH_HEADER")
 AI_GATEWAY_AUTH_VALUE_TEMPLATE = env.str("AI_GATEWAY_AUTH_VALUE_TEMPLATE")
 AI_GATEWAY_EMBEDDINGS_MODEL = env.str("AI_GATEWAY_EMBEDDINGS_MODEL")
@@ -114,14 +114,14 @@ embedding_client = EmbeddingClient(
     AI_GATEWAY_URL,
     AI_GATEWAY_EMBEDDINGS_MODEL,
     config.search_tools.embedding_timeout,
-    AI_GATEWAY_API_KEY,
+    AI_GATEWAY_AUTH_KEY,
     AI_GATEWAY_AUTH_HEADER,
     AI_GATEWAY_AUTH_VALUE_TEMPLATE,
 )
 reasoning_client = ReasoningClient(
     AI_GATEWAY_URL,
     config.search_tools.generate_timeout,
-    AI_GATEWAY_API_KEY,
+    AI_GATEWAY_AUTH_KEY,
     AI_GATEWAY_AUTH_HEADER,
     AI_GATEWAY_AUTH_VALUE_TEMPLATE,
 )
@@ -130,7 +130,7 @@ reranker_client = (
         AI_GATEWAY_URL,
         AI_GATEWAY_RERANKER_MODEL,
         config.search_tools.reranker.timeout,
-        AI_GATEWAY_API_KEY,
+        AI_GATEWAY_AUTH_KEY,
         AI_GATEWAY_AUTH_HEADER,
         AI_GATEWAY_AUTH_VALUE_TEMPLATE,
     )

@@ -40,7 +40,7 @@ x-qdrant-url: &qdrant-url "http://qdrant:6333"
 # ["host.docker.internal: host-gateway"]` entry below (Docker Engine 20.10+)
 # even when set to that value explicitly.
 x-ai-gateway-url: &ai-gateway-url "http://${AI_GATEWAY_HOST:?set AI_GATEWAY_HOST, e.g. in a .env file next to docker-compose.yml}:${AI_GATEWAY_PORT:-4000}"
-x-ai-gateway-api-key: &ai-gateway-api-key "${AI_GATEWAY_API_KEY:?set AI_GATEWAY_API_KEY, e.g. in a .env file next to docker-compose.yml}"
+x-ai-gateway-api-key: &ai-gateway-auth-key "${AI_GATEWAY_AUTH_KEY:?set AI_GATEWAY_AUTH_KEY, e.g. in a .env file next to docker-compose.yml}"
 x-ai-gateway-auth-header: &ai-gateway-auth-header "${AI_GATEWAY_AUTH_HEADER:?set AI_GATEWAY_AUTH_HEADER, e.g. in a .env file next to docker-compose.yml}"
 x-ai-gateway-auth-value-template: &ai-gateway-auth-value-template "${AI_GATEWAY_AUTH_VALUE_TEMPLATE:?set AI_GATEWAY_AUTH_VALUE_TEMPLATE, e.g. in a .env file next to docker-compose.yml}"
 x-mcp-url: &mcp-url "http://mcp-server:8000/mcp"
@@ -106,7 +106,7 @@ services:
       QDRANT_URL: *qdrant-url
       QDRANT_COLLECTION: *qdrant-collection
       AI_GATEWAY_URL: *ai-gateway-url
-      AI_GATEWAY_API_KEY: *ai-gateway-api-key
+      AI_GATEWAY_AUTH_KEY: *ai-gateway-auth-key
       AI_GATEWAY_AUTH_HEADER: *ai-gateway-auth-header
       AI_GATEWAY_AUTH_VALUE_TEMPLATE: *ai-gateway-auth-value-template
       AI_GATEWAY_EMBEDDINGS_MODEL: *embeddings-model
@@ -268,7 +268,7 @@ services:
       QDRANT_URL: *qdrant-url
       QDRANT_COLLECTION: *qdrant-collection
       AI_GATEWAY_URL: *ai-gateway-url
-      AI_GATEWAY_API_KEY: *ai-gateway-api-key
+      AI_GATEWAY_AUTH_KEY: *ai-gateway-auth-key
       AI_GATEWAY_AUTH_HEADER: *ai-gateway-auth-header
       AI_GATEWAY_AUTH_VALUE_TEMPLATE: *ai-gateway-auth-value-template
       AI_GATEWAY_EMBEDDINGS_MODEL: *embeddings-model

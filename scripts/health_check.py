@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Pre-flight health check for the RAG stack's two live HTTP dependencies
 (Qdrant, AI gateway). Run inside the mcp-server container, where the real
-AI_GATEWAY_URL/AI_GATEWAY_API_KEY/etc env vars and network routes (qdrant,
+AI_GATEWAY_URL/AI_GATEWAY_AUTH_KEY/etc env vars and network routes (qdrant,
 host.docker.internal) already exist:
 
     docker compose exec -T mcp-server python3 - < scripts/health_check.py
@@ -35,7 +35,7 @@ def check_qdrant() -> tuple[bool, str]:
 
 def check_ai_gateway() -> tuple[bool, str]:
     base_url = os.environ.get("AI_GATEWAY_URL", "")
-    api_key = os.environ.get("AI_GATEWAY_API_KEY", "")
+    api_key = os.environ.get("AI_GATEWAY_AUTH_KEY", "")
     auth_header = os.environ.get("AI_GATEWAY_AUTH_HEADER", "")
     auth_value_template = os.environ.get("AI_GATEWAY_AUTH_VALUE_TEMPLATE", "")
     if not base_url:
