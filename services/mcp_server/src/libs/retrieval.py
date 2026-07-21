@@ -43,6 +43,22 @@ def _looks_identifier_shaped(query: str) -> bool:
     return q.startswith("--") or any(c in q for c in "_-.")
 
 
+def _dense_vector(hit: Any) -> list[float] | None:
+    vector = getattr(hit, "vector", None)
+    if isinstance(vector, dict):
+        return vector.get("dense")
+    return vector
+
+
+def _cosine_similarity(a: list[float], b: list[float]) -> float:
+    dot = sum(x * y for x, y in zip(a, b))
+    norm_a = sum(x * x for x in a) ** 0.5
+    norm_b = sum(y * y for y in b) ** 0.5
+    if norm_a == 0.0 or norm_b == 0.0:
+        return 0.0
+    return dot / (norm_a * norm_b)
+
+
 class RetrievalConfig(BaseModel):
     top_k_retrieve: int = Field(gt=0)
     top_k_rerank: int = Field(gt=0)
@@ -50,6 +66,14 @@ class RetrievalConfig(BaseModel):
     # from the same source_path before reranking. null keeps the old
     # uncapped behavior.
     max_chunks_per_source: int | None = Field(default=None, gt=0)
+    # null | float in (0, 1]. Cosine-similarity threshold, on dense vectors,
+    # for dropping a candidate as a near-duplicate of a higher-ranked one
+    # already kept -- e.g. the same explanation repeated near-verbatim
+    # across two pages. Compared pairwise against every hit already kept,
+    # in hybrid_search's fused rank order, so the higher-ranked hit of a
+    # near-duplicate pair always survives. null disables this (no
+    # dedup, same as before this existed).
+    dedup_similarity_threshold: float | None = Field(default=None, gt=0, le=1)
 
 
 def retrieval_status(

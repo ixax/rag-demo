@@ -1,7 +1,8 @@
 """RagPipeline: the RAG chain (query rewrite -> embed -> route -> typo
 correct -> synonym expand -> sparse vector -> filters -> exact match ->
-hybrid Qdrant search -> per-source cap -> rerank -> merge -> summary search
--> [answer_question only] build context -> generate -> parse answer) as one
+hybrid Qdrant search -> near-duplicate dedup -> per-source cap -> rerank ->
+merge -> summary search -> [answer_question only] build context -> generate
+-> parse answer) as one
 class, one method per step.
 
 Every step method has the signature `(self, state: PipelineState) ->
@@ -24,7 +25,7 @@ from __future__ import annotations
 
 import copy
 import time
-from typing import Callable
+from typing import Any, Callable
 
 from qdrant_client import QdrantClient
 from qdrant_client.models import FieldCondition, Filter, Fusion, FusionQuery, MatchAny, MatchValue, Prefetch
@@ -37,7 +38,7 @@ from .config import SearchToolsConfig, parse_structured_answer
 from .pipeline_state import PipelineState
 from .query_rewrite import rewrite_query as _call_rewrite_query
 from .query_router import QueryRouter
-from .retrieval import _exact_match_result, _looks_identifier_shaped
+from .retrieval import _cosine_similarity, _dense_vector, _exact_match_result, _looks_identifier_shaped
 from .synonyms import expand_query
 from .typo_correct import correct_tokens
 
@@ -55,6 +56,7 @@ class RagPipeline:
         "build_filters",
         "exact_match_search",
         "hybrid_search",
+        "dedup_near_duplicates",
         "cap_chunks_per_source",
         "rerank_results",
         "merge_results",
@@ -229,10 +231,37 @@ class RagPipeline:
                 ],
                 query=FusionQuery(fusion=Fusion.RRF),
                 limit=state.top_k_retrieve,
+                # Needed by dedup_near_duplicates' cosine-similarity check
+                # below -- skip the (unused) sparse vector to keep the
+                # response small.
+                with_vectors=["dense"],
             )
         state.hits = response.points
         if state.on_step:
             state.on_step("qdrant_search", state.timer.trace[-1]["duration_ms"], {"candidates": len(state.hits)})
+        return state
+
+    def dedup_near_duplicates(self, state: PipelineState) -> PipelineState:
+        threshold = self.config.retrieval.dedup_similarity_threshold
+        if threshold is None or not state.hits:
+            return state
+        with state.timer("dedup_near_duplicates"):
+            kept: list[Any] = []
+            kept_vectors: list[list[float]] = []
+            dropped = 0
+            for hit in state.hits:
+                vector = _dense_vector(hit)
+                # A hit fused in via the sparse-only leg can carry no dense
+                # vector -- always keep it, since similarity can't be checked.
+                if vector is not None and any(_cosine_similarity(vector, kv) >= threshold for kv in kept_vectors):
+                    dropped += 1
+                    continue
+                kept.append(hit)
+                if vector is not None:
+                    kept_vectors.append(vector)
+            state.hits = kept
+        if state.on_step:
+            state.on_step("dedup_near_duplicates", state.timer.trace[-1]["duration_ms"], {"dropped": dropped})
         return state
 
     def cap_chunks_per_source(self, state: PipelineState) -> PipelineState:

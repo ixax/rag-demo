@@ -213,7 +213,7 @@ Queries can be in Russian or English; `answer_question` replies in whatever lang
 
 ### Pipeline steps
 
-`answer_question` runs all 16 steps below in order (`RagPipeline.STEP_ORDER`, `services/mcp_server/src/libs/pipeline.py`), threading one `PipelineState` object forward. `search_documents` runs the same pipeline but with `want_answer=False`, so the last three steps (context/generate/parse) become no-ops and it returns after `merge_results`/`summary_search`. Config knobs referenced below live in `services/mcp_server/config.yml`, under `search_tools`.
+`answer_question` runs all 17 steps below in order (`RagPipeline.STEP_ORDER`, `services/mcp_server/src/libs/pipeline.py`), threading one `PipelineState` object forward. `search_documents` runs the same pipeline but with `want_answer=False`, so the last three steps (context/generate/parse) become no-ops and it returns after `merge_results`/`summary_search`. Config knobs referenced below live in `services/mcp_server/config.yml`, under `search_tools`.
 
 #### 1. `rewrite_query`
 
@@ -251,31 +251,35 @@ Looks up an exact match against the `identifiers` payload field (config keys, CL
 
 Runs the dense (`vector`) and sparse (`sparse_vec`) queries against Qdrant in parallel, fused by RRF (Reciprocal Rank Fusion), scoped by `query_filter`. Needed as the main retrieval step — combining both retrieval modes catches both "semantically similar" and "exact term" matches in one ranked list. Expected output: `hits`, up to `search_tools.retrieval.top_k_retrieve` candidates.
 
-#### 10. `cap_chunks_per_source`
+#### 10. `dedup_near_duplicates`
+
+Drops a hit whose dense-vector cosine similarity to a higher-ranked hit already kept is >= `search_tools.retrieval.dedup_similarity_threshold`, walking `hits` in their post-`hybrid_search` rank order so the higher-ranked hit of a near-duplicate pair always survives. Needed because near-identical passages (the same explanation repeated across two pages) otherwise burn multiple context slots on one fact instead of giving the model more distinct coverage. Expected output: `hits`, trimmed in place (unchanged when the threshold is `null`).
+
+#### 11. `cap_chunks_per_source`
 
 Caps how many of `hits` may come from the same `source_path` (`search_tools.retrieval.max_chunks_per_source`). Needed so one large page can't crowd out every other relevant source in the candidate pool before reranking even runs. Expected output: `hits`, trimmed in place (unchanged when the cap is `null`).
 
-#### 11. `rerank_results`
+#### 12. `rerank_results`
 
 Scores each hit's chunk text against `search_query` with a cross-encoder reranker service (`search_tools.reranker`, off by default — falls back to plain Qdrant order when disabled or when the reranker call itself fails). Needed because dense/sparse similarity alone is a weaker relevance signal than a cross-encoder that actually reads query and chunk together. Expected output: `reranked`, a list of `(hit, score)` pairs, sorted, sliced to `top_k_rerank`, optionally cut further by `confidence_cutoff`.
 
-#### 12. `merge_results`
+#### 13. `merge_results`
 
 Merges `exact_hits` (first, deduplicated) with `reranked` into one flat list of plain dicts (title/description/source_path/heading/updated/text/scores). Needed to give every downstream step (context building, the `search_documents` response) one uniform shape regardless of which retrieval path a chunk came from. Expected output: `results`.
 
-#### 13. `summary_search`
+#### 14. `summary_search`
 
 For `global`-routed queries only, queries the page-level summary index (`<QDRANT_COLLECTION>_summaries`, one point per source page, written by `ingest`) by dense similarity. Needed because a broad "how does X work overall" question is better served by whole-page summaries than by individual chunks. Expected output: `summary_hits` — always empty for `point`-routed queries.
 
-#### 14. `build_context`
+#### 15. `build_context`
 
 (`answer_question` only — no-op when `want_answer` is `False`.) Renders `results` + `summary_hits` into one context block using `search_tools.source_template`/`summary.source_template`, numbering each item `id=1..N`. Needed as the exact text handed to the generation model — the `id` numbering here is what the model's `sources` output later refers back to. Expected output: `context_items` (the raw list) and `context_text` (the rendered block).
 
-#### 15. `generate_answer`
+#### 16. `generate_answer`
 
 (`answer_question` only — no-op when there's no context.) Sends `context_text` + the original `query` to the reasoning model, constrained by `search_tools.generation.response_schema` to a `{reasoning, answer, sources}` JSON shape. Needed to produce the actual answer, grounded only in the retrieved context (the system prompt forbids outside knowledge). Expected output: `generation_text`, the model's raw JSON reply as a string.
 
-#### 16. `parse_answer`
+#### 17. `parse_answer`
 
 (`answer_question` only.) Parses `generation_text` as JSON (`parse_structured_answer`, `services/mcp_server/src/libs/config.py`) and maps the model's bare integer `sources` ids back to `[id] title (path)` citation strings using `context_items`. Needed to turn the model's raw JSON reply into the three fields the tool actually returns. Expected output: `answer`, `reasoning`, `sources` — or, when `context_items` was empty, a fixed "no relevant documents" `answer` with `reasoning=None`/`sources=[]` (the generation/parse steps above never ran in that case).
 

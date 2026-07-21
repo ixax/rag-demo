@@ -72,6 +72,11 @@ search_tools:
     # page from crowding out other relevant sources in the candidate pool.
     # null disables the cap.
     max_chunks_per_source: 3
+    # null | float in (0, 1]. Right after hybrid_search, drops a candidate
+    # whose dense-vector cosine similarity to a higher-ranked candidate
+    # already kept is >= this value -- e.g. the same explanation repeated
+    # near-verbatim across two pages. null disables this (no dedup).
+    dedup_similarity_threshold: 0.97
 
   # Reasoning/generation backend for answer_question -- always
   # AI_GATEWAY_REASONING_MODEL via the AI gateway's /v1/chat/completions,
