@@ -211,6 +211,93 @@ Queries can be in Russian or English; `answer_question` replies in whatever lang
 - **Claude (Console / Desktop / claude.ai):** add it as a remote MCP connector using the URL above (`http://localhost:8000/mcp` if running locally, or a reachable host/port otherwise).
 - **Open WebUI:** add it under Settings → Tools as an MCP tool server using the same URL (from inside the compose network, other containers should reach it at `http://mcp-server:8000/mcp` instead of `localhost`).
 
+### Pipeline steps
+
+`answer_question` runs all 16 steps below in order (`RagPipeline.STEP_ORDER`, `services/mcp_server/src/libs/pipeline.py`), threading one `PipelineState` object forward. `search_documents` runs the same pipeline but with `want_answer=False`, so the last three steps (context/generate/parse) become no-ops and it returns after `merge_results`/`summary_search`. Config knobs referenced below live in `services/mcp_server/config.yml`, under `search_tools`.
+
+#### 1. `rewrite_query`
+
+Rephrases the raw user query into a short, formal, documentation-style search query via an LLM call (`search_tools.query_rewrite`, off by default). Needed because embeddings retrieve better against text that looks like the documentation's own wording than against a casual question. Expected output: `search_query`, a rewritten query in the same language — or, when disabled, `search_query` is just a passthrough copy of `query`.
+
+#### 2. `embed_query`
+
+Embeds `search_query` into a dense vector via the AI gateway's embeddings model. Needed as the input to both the dense half of `hybrid_search` and `route_query`'s classification. Expected output: `vector`, a fixed-dimension float list.
+
+#### 3. `route_query`
+
+Classifies the query as `point` (a specific value/parameter/step) or `global` (a broad overview) by cosine similarity against a small set of hardcoded reference examples (`search_tools.router`). Needed because a `global` query should also pull from the page-level summary index, which a `point` query gains nothing from. Expected output: `route_type`, one of `"point"`/`"global"` — feeds `summary_search` later, doesn't otherwise change retrieval.
+
+#### 4. `correct_typos`
+
+Fuzzy-corrects each token of `search_query` against `vocab.json` (titles/headings/tags indexed by `ingest`), using rapidfuzz (`search_tools.typo_correction`, on by default, local, no network call). Needed because the sparse/lexical branch below matches on exact tokens — a typo would otherwise silently drop that token's contribution. Expected output: `lexical_query`, token-corrected text (unchanged if no vocab is loaded yet, or no token clears the similarity threshold).
+
+#### 5. `expand_synonyms`
+
+Appends known synonyms (`services/mcp_server/synonyms.yml`) of matched terms to `lexical_query` (`search_tools.synonym_expansion`, on by default, local). Needed so the exact-token sparse branch still matches when the user's wording differs from the documentation's own terminology. Expected output: `lexical_query`, with synonym terms appended.
+
+#### 6. `compute_sparse_vector`
+
+Builds a sparse (term-frequency) vector from `lexical_query`. Needed as the lexical half of the hybrid search below, catching exact-token matches (identifiers, flags, config keys) that a dense embedding alone can blur together with semantically-similar-but-wrong text. Expected output: `sparse_vec`.
+
+#### 7. `build_filters`
+
+Builds a Qdrant `Filter` from the caller-supplied `title`/`description`/`source_path`/`tags` arguments, if any were passed to the tool call. Needed to scope retrieval to a specific page/section when the caller already knows where to look. Expected output: `query_filter` — `None` when no filter arguments were given, so retrieval is unrestricted.
+
+#### 8. `exact_match_search`
+
+Looks up an exact match against the `identifiers` payload field (config keys, CLI flags, dotted method paths — anything `IDENTIFIER_RE` extracted at ingest time), but only when `search_query` itself looks identifier-shaped. Needed because hybrid search can rank a semantically-close chunk above the one literal chunk that actually defines the identifier being asked about. Expected output: `exact_hits`, a list of exact-match points (usually empty — most queries aren't a bare identifier).
+
+#### 9. `hybrid_search`
+
+Runs the dense (`vector`) and sparse (`sparse_vec`) queries against Qdrant in parallel, fused by RRF (Reciprocal Rank Fusion), scoped by `query_filter`. Needed as the main retrieval step — combining both retrieval modes catches both "semantically similar" and "exact term" matches in one ranked list. Expected output: `hits`, up to `search_tools.retrieval.top_k_retrieve` candidates.
+
+#### 10. `cap_chunks_per_source`
+
+Caps how many of `hits` may come from the same `source_path` (`search_tools.retrieval.max_chunks_per_source`). Needed so one large page can't crowd out every other relevant source in the candidate pool before reranking even runs. Expected output: `hits`, trimmed in place (unchanged when the cap is `null`).
+
+#### 11. `rerank_results`
+
+Scores each hit's chunk text against `search_query` with a cross-encoder reranker service (`search_tools.reranker`, off by default — falls back to plain Qdrant order when disabled or when the reranker call itself fails). Needed because dense/sparse similarity alone is a weaker relevance signal than a cross-encoder that actually reads query and chunk together. Expected output: `reranked`, a list of `(hit, score)` pairs, sorted, sliced to `top_k_rerank`, optionally cut further by `confidence_cutoff`.
+
+#### 12. `merge_results`
+
+Merges `exact_hits` (first, deduplicated) with `reranked` into one flat list of plain dicts (title/description/source_path/heading/updated/text/scores). Needed to give every downstream step (context building, the `search_documents` response) one uniform shape regardless of which retrieval path a chunk came from. Expected output: `results`.
+
+#### 13. `summary_search`
+
+For `global`-routed queries only, queries the page-level summary index (`<QDRANT_COLLECTION>_summaries`, one point per source page, written by `ingest`) by dense similarity. Needed because a broad "how does X work overall" question is better served by whole-page summaries than by individual chunks. Expected output: `summary_hits` — always empty for `point`-routed queries.
+
+#### 14. `build_context`
+
+(`answer_question` only — no-op when `want_answer` is `False`.) Renders `results` + `summary_hits` into one context block using `search_tools.source_template`/`summary.source_template`, numbering each item `id=1..N`. Needed as the exact text handed to the generation model — the `id` numbering here is what the model's `sources` output later refers back to. Expected output: `context_items` (the raw list) and `context_text` (the rendered block).
+
+#### 15. `generate_answer`
+
+(`answer_question` only — no-op when there's no context.) Sends `context_text` + the original `query` to the reasoning model, constrained by `search_tools.generation.response_schema` to a `{reasoning, answer, sources}` JSON shape. Needed to produce the actual answer, grounded only in the retrieved context (the system prompt forbids outside knowledge). Expected output: `generation_text`, the model's raw JSON reply as a string.
+
+#### 16. `parse_answer`
+
+(`answer_question` only.) Parses `generation_text` as JSON (`parse_structured_answer`, `services/mcp_server/src/libs/config.py`) and maps the model's bare integer `sources` ids back to `[id] title (path)` citation strings using `context_items`. Needed to turn the model's raw JSON reply into the three fields the tool actually returns. Expected output: `answer`, `reasoning`, `sources` — or, when `context_items` was empty, a fixed "no relevant documents" `answer` with `reasoning=None`/`sources=[]` (the generation/parse steps above never ran in that case).
+
+### Startup warmup
+
+`mcp-server` pays every model's cold-start cost once at startup instead of on whichever request happens to arrive first (`services/mcp_server/src/libs/wiring.py`'s `_warm_up()`, run at the end of `build_pipeline()`):
+
+- `query_router` — embeds the 12 hardcoded reference examples `QueryRouter` classifies queries against (`search_tools.router.point_examples`/`global_examples` in `config.yml`); also warms the embedding model itself, since it's the same AI gateway call `embed_query` uses.
+- `reasoning_model` — one throwaway `generate()` call ("Reply with OK." / "OK"), warming the model behind `AI_GATEWAY_REASONING_MODEL` (used by `query_rewrite` and `answer_question`'s generation step).
+- `reranker_model` — one throwaway `rerank()` call, only when `search_tools.reranker.enabled` is `true`.
+
+Each step logs its own duration, bracketed by an overall start/finish line:
+
+```
+warmup started
+warmup step=query_router duration_ms=2985.6
+warmup step=reasoning_model duration_ms=821.9
+warmup finished total_duration_ms=3808.5
+```
+
+(`docker compose logs mcp-server`, or `make mcp-logs`.) What actually gets reused afterward differs by layer: `QueryRouter`'s embedded vectors are cached in the process's own memory for as long as `mcp-server` keeps running; the AI gateway backend (e.g. Ollama) keeps a warmed model resident in its own memory for some `keep_alive` window after last use, independent of this process — a long enough gap between requests still pays the cold-load cost again, warmup or not; and the `httpx.Client` each AI gateway client holds (`services/_common/clients/ai_gateway_client.py`) pools its TCP connection, so the warmup request's connection is what the first real request reuses too.
+
 ## Stopping the stack
 
 | Goal                                                    | Command                                                                       | Effect                                                                                                                                                                                                                                                                                                                           |
@@ -229,7 +316,7 @@ Queries can be in Russian or English; `answer_question` replies in whatever lang
 
 - **A service in `make status` shows "NOT RESPONDING" right after `make up`.** Most services take a few seconds to a few minutes to become healthy on first start. Check `docker compose ps` for its actual state and `docker compose logs -f <service>` for what it's doing; re-run `make status` after it settles. See the specific cases below for the slow-first-start services.
 - **Model pulling/loading behind a AI gateway alias is slow or seems stuck.** This is now that backing deployment's concern, not this repo's or the gateway's -- see its own troubleshooting docs.
-- **First `search_documents`/`answer_question` call is slow.** Whatever cross-encoder model backs `AI_GATEWAY_RERANKER_MODEL` may download on first use, not at build time -- see that reranker deployment's own troubleshooting docs.
+- **First `search_documents`/`answer_question` call is slow.** `mcp-server` warms the embedding/reasoning/reranker models at startup (see [Startup warmup](#startup-warmup)), so this shouldn't be the cause anymore -- check `make mcp-logs` for the `warmup ...` lines and their timings first. If warmup itself was slow, or ran too long ago (the AI gateway backend can evict an idle model after its own `keep_alive` window), the next call pays the cold-load cost again regardless. Whatever cross-encoder model backs `AI_GATEWAY_RERANKER_MODEL` may also download on first use, not at build time -- see that reranker deployment's own troubleshooting docs.
 - **"RAG (UE Docs)" model is missing from Open WebUI's picker.** Two possible causes: (1) `pipelines` installs `rag_pipeline.py`'s `requirements:` frontmatter packages into its own venv on every container start (not baked into the image) — check `docker compose logs pipelines` for install progress or errors; (2) a brand-new Open WebUI account needs to complete first-visit admin signup before any model (Ollama or pipelines) appears in the picker at all.
 - **Open WebUI's `/workspace/models` page is empty even though models are pulled.** Expected — that page only lists model *entries* you've explicitly pinned there. The actual pulled Ollama models (and the pipelines model) show up in the chat page's model dropdown instead.
 - **Chatting against the embedding model in Open WebUI fails with an HTTP 400.** `AI_GATEWAY_EMBEDDINGS_MODEL` is embedding-only and doesn't support Ollama's `/api/chat` endpoint. Always chat against `AI_GATEWAY_REASONING_MODEL`; reserve `AI_GATEWAY_EMBEDDINGS_MODEL` for embedding calls.

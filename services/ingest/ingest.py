@@ -111,12 +111,17 @@ class _SummaryConfig(BaseModel):
     timeout: float = Field(gt=0)
 
 
+class _FeaturesConfig(BaseModel):
+    normalize_windows_paths: bool = False
+
+
 class IngestConfig(BaseModel):
     paths: _PathsConfig
     chunking: _ChunkingConfig
     upsert_batch_size: int = Field(gt=0)
     embedding_timeout: float = Field(gt=0)
     summary: _SummaryConfig
+    features: _FeaturesConfig = _FeaturesConfig()
 
 
 _config = load_yaml_config(Path("config.yml"), IngestConfig)
@@ -132,6 +137,7 @@ UPSERT_BATCH_SIZE = _config.upsert_batch_size
 EMBEDDING_TIMEOUT = _config.embedding_timeout
 SUMMARY_SYSTEM_PROMPT = _config.summary.system_prompt
 SUMMARY_TIMEOUT = _config.summary.timeout
+NORMALIZE_WINDOWS_PATHS = _config.features.normalize_windows_paths
 
 # Fixed suffix, not independently configurable -- mcp-server's retrieval
 # code (libs/retrieval.py's retrieve_summary) queries this exact name
@@ -248,8 +254,41 @@ def _html_table_to_text(fragment: str) -> str:
     return "\n".join(lines)
 
 
+_FENCED_CODE_RE = re.compile(r"```.*?```", re.DOTALL)
+_INLINE_CODE_RE = re.compile(r"`([^`\n]+)`")
+
+
+def _normalize_windows_paths(text: str) -> str:
+    """Rewrites backslashes to forward slashes inside inline `code` spans
+    (fenced ``` blocks are left untouched -- those can be real code, where a
+    backslash may be meaningful). Gated by features.normalize_windows_paths
+    in config.yml: a doc's literal Windows-style path (e.g.
+    `\\win64\\unifiededitor.exe`), reproduced verbatim by the generation
+    model into a JSON-schema-constrained reply, corrupts under
+    parse_structured_answer's json.loads -- grammar-constrained JSON sampling
+    only allows a bare backslash to be followed by one of \"\\/bfnrtu, so a
+    literal single backslash the model didn't double-escape gets silently
+    decoded as an unintended escape (\\b/\\u...) instead of raising. Fixing
+    it here removes the backslash from the model's context entirely, instead
+    of relying on the model to escape correctly."""
+    fences: list[str] = []
+
+    def _protect_fence(m: re.Match) -> str:
+        fences.append(m.group())
+        return f"\x00FENCE{len(fences) - 1}\x00"
+
+    text = _FENCED_CODE_RE.sub(_protect_fence, text)
+    text = _INLINE_CODE_RE.sub(lambda m: "`" + m.group(1).replace("\\", "/") + "`", text)
+    for i, fence in enumerate(fences):
+        text = text.replace(f"\x00FENCE{i}\x00", fence)
+    return text
+
+
 def clean_body(body: str, params: dict[str, Any]) -> str:
     text = body
+
+    if NORMALIZE_WINDOWS_PATHS:
+        text = _normalize_windows_paths(text)
 
     # Convert Hugo table shortcodes (wrapping raw HTML tables) to plain text.
     def _table_sub(m: re.Match) -> str:

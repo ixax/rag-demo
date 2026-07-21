@@ -146,6 +146,51 @@ services:
       qdrant:
         condition: service_healthy
 
+  # Interactive CLI walkthrough of the RagPipeline (services/mcp_server/src/
+  # libs/pipeline.py), one step at a time -- see interactive_test.py.
+  # Reuses mcp-server's own image/env/volumes so there's nothing to keep in
+  # sync between "the server" and "the thing that exercises it manually".
+  # `profiles: [tools]` keeps it out of `make up`/`docker compose up` --
+  # run it explicitly with `docker compose run --rm test_search_pipeline`.
+  test_search_pipeline:
+    profiles:
+      - tools
+    build:
+      context: .
+      dockerfile: services/mcp_server/Dockerfile
+    container_name: rag-test-search-pipeline
+    command: ["python", "interactive_test.py"]
+    # `input()` needs an attached stdin/tty -- `docker compose run` grants
+    # both, but this pins them so the service definition alone is enough.
+    stdin_open: true
+    tty: true
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      QDRANT_URL: *qdrant-url
+      QDRANT_COLLECTION: *qdrant-collection
+      AI_GATEWAY_URL: *ai-gateway-url
+      AI_GATEWAY_AUTH_KEY: *ai-gateway-auth-key
+      AI_GATEWAY_AUTH_HEADER: *ai-gateway-auth-header
+      AI_GATEWAY_AUTH_VALUE_TEMPLATE: *ai-gateway-auth-value-template
+      AI_GATEWAY_EMBEDDINGS_MODEL: *embeddings-model
+      AI_GATEWAY_REASONING_MODEL: *reasoning-model
+      AI_GATEWAY_RERANKER_MODEL: *reranker-model
+      MCP_HOST: *mcp-host
+      MCP_PORT: *mcp-internal-port
+      LOG_LEVEL: *log-level
+      OTEL_EXPORTER_OTLP_ENDPOINT: *otel-url
+    volumes:
+      - ./services/mcp_server/src:/app/src
+      - ./services/mcp_server/interactive_test.py:/app/interactive_test.py
+      - ./services/mcp_server/config.yml:/app/config.yml
+      - ./services/mcp_server/synonyms.yml:/app/synonyms.yml
+      - ./services/_common:/app/_common
+      - ingest_state:/state:ro
+    depends_on:
+      qdrant:
+        condition: service_healthy
+
   open-webui:
     profiles:
       - open-webui

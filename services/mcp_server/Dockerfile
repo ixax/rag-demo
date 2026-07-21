@@ -2,6 +2,12 @@ FROM python:3.12-slim
 
 WORKDIR /app
 ENV PYTHONUNBUFFERED=1
+# Forces UTF-8 for all text I/O (stdin/stdout/files) regardless of the
+# container's locale -- python:3.12-slim has no locale configured, which
+# left interactive_test.py's Cyrillic input() reads silently corrupted
+# (mis-decoded multibyte chars, then a UnicodeEncodeError on lone surrogates
+# when the query was sent to the AI gateway).
+ENV PYTHONUTF8=1
 
 COPY services/mcp_server/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt

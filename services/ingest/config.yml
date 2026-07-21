@@ -59,3 +59,13 @@ summary:
     prose, no headings, lists, or markers.
   # Request timeout (seconds) for this call. Number > 0.
   timeout: 120
+
+# Opt-in content transforms, off by default. Each one rewrites body text
+# during clean_body() before chunking -- re-ingest (`make ingest-force`) to
+# apply a change to already-indexed pages.
+features:
+  # true | false. Rewrites backslashes to forward slashes inside inline
+  # `code` spans (fenced ``` blocks are left untouched). Applies to Windows-
+  # style paths like `\win64\unifiededitor.exe` that documentation pages may
+  # contain literally.
+  normalize_windows_paths: true

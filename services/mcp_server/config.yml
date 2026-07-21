@@ -10,6 +10,23 @@
 # Everything behind search_documents/answer_question -- retrieval, reranking,
 # and RAG-answer generation.
 search_tools:
+
+  # Rephrases the query into a more formal, documentation-style query
+  # before embedding, using the same reasoning backend as answer_question's
+  # generation step (see libs/query_rewrite.py). Adds an extra LLM call +
+  # latency to every query -- opt-in, unlike
+  # typo_correction/synonym_expansion above which are local and on by
+  # default.
+  query_rewrite:
+    enabled: true
+    # Placeholder -- overwritten at startup from AI_GATEWAY_REASONING_MODEL,
+    # same as search_tools.reasoning.model above.
+    model: "$AI_GATEWAY_REASONING_MODEL"
+    system_prompt: |
+      Rewrite the user's question into a short, formal, documentation-style
+      search query in the same language. Keep it a query, not a full
+      sentence. Respond with only the rewritten query, nothing else.
+
   # Reranking between Qdrant retrieval and generation, via an external
   # reranker HTTP service this repo doesn't own -- its model/max_length are
   # that deployment's own config, not this file's concern.
@@ -31,7 +48,7 @@ search_tools:
     # a mediocre top match still beats returning no context at all. null
     # disables this (all top_k_rerank chunks are kept regardless of score).
     # Ignored when enabled is false (no rerank_score to gate on).
-    confidence_cutoff: 0.9
+    confidence_cutoff: 0.03
     # Request timeout (seconds) for the reranker service's /rerank call.
     # Number > 0. Reranker inference can take a while, especially on a cold
     # model load, a loaded host, or a larger top_k_retrieve candidate batch.
@@ -96,8 +113,20 @@ search_tools:
 
       Output JSON with exactly these keys:
       reasoning: 1-2 sentences on which sources you used and why.
-      answer: plain prose or steps, no [n] markers. Only facts literally in
-        the sources. If they don't support a reliable answer, say so here.
+      answer: no [n] markers. Only facts literally in the sources. If they
+        don't support a reliable answer, say so here.
+        If the question asks how to do/set up/configure something:
+        start with one sentence naming the relevant tool/panel and where to
+        find it (if the sources say so), then a numbered list of concrete
+        steps (1. 2. 3. ...), even if the sources only give an unordered
+        table of options/parameters -- turn EVERY relevant option from the
+        sources into one step (do not drop any just because they weren't in
+        an earlier draft), in a sensible order (e.g. enable/select first,
+        then the parameters that shape the result, finishing with
+        fine-tuning ones), using the specific values/examples the sources
+        give where present. Do not invent steps or values not literally in
+        the sources.
+        Otherwise (the question is not a how-to), plain prose is fine.
       sources: array of the integer ids (the source id="N" attribute) of
         sources actually used in answer.
 
@@ -180,22 +209,6 @@ search_tools:
   # by default.
   synonym_expansion:
     enabled: true
-
-  # Rephrases the query into a more formal, documentation-style query
-  # before embedding, using the same reasoning backend as answer_question's
-  # generation step (see libs/query_rewrite.py). Adds an extra LLM call +
-  # latency to every query -- opt-in, unlike
-  # typo_correction/synonym_expansion above which are local and on by
-  # default.
-  query_rewrite:
-    enabled: false
-    # Placeholder -- overwritten at startup from AI_GATEWAY_REASONING_MODEL,
-    # same as search_tools.reasoning.model above.
-    model: "$AI_GATEWAY_REASONING_MODEL"
-    system_prompt: |
-      Rewrite the user's question into a short, formal, documentation-style
-      search query in the same language. Keep it a query, not a full
-      sentence. Respond with only the rewritten query, nothing else.
 
   # Classifies each query as "point" (a specific value/parameter/step) or
   # "global" (a broad, whole-page/whole-topic overview) via cosine
