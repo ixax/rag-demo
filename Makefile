@@ -8,7 +8,7 @@ PIPELINES_PORT ?= 9099
 
 .PHONY: up down restart status ps logs ingest ingest-force mcp-logs clean monitoring-up monitoring-down monitoring-logs webui-up webui-down webui-logs interactive_test
 
-up:
+up start:
 	docker compose up -d --build --remove-orphans
 
 # Depends on webui-down/monitoring-down (defined below) so their
@@ -17,7 +17,7 @@ up:
 # containers (if up) running and their volumes busy, since compose only
 # stops/removes services with no profile assigned unless their profile is
 # passed explicitly.
-down: webui-down monitoring-down
+down stop: webui-down monitoring-down
 	docker compose down
 
 clean:
