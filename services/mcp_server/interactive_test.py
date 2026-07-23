@@ -4,7 +4,7 @@ step by step, against the live stack (Qdrant + AI gateway).
 Run via the dedicated `test_search_pipeline` docker-compose service (same
 env vars/volumes as mcp-server, no live MCP protocol involved):
 
-    docker compose run --rm test_search_pipeline
+    make interactive_test
 
 All step numbering/descriptions and prompt text belong ONLY in this file --
 src/libs/pipeline.py exposes RagPipeline.STEP_ORDER (just the method names)

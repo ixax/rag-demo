@@ -6,7 +6,7 @@ OPEN_WEBUI_PORT ?= 3000
 MCP_SERVER_PORT ?= 8000
 PIPELINES_PORT ?= 9099
 
-.PHONY: up down restart status ps logs ingest ingest-force mcp-logs clean monitoring-up monitoring-down monitoring-logs webui-up webui-down webui-logs
+.PHONY: up down restart status ps logs ingest ingest-force mcp-logs clean monitoring-up monitoring-down monitoring-logs webui-up webui-down webui-logs interactive_test
 
 up:
 	docker compose up -d --build --remove-orphans
@@ -39,6 +39,9 @@ ingest:
 
 ingest-force:
 	docker compose --profile ingest run --rm --build -e FORCE_INGEST=true ingest
+
+interactive_test:
+	docker compose --profile tools run --rm --build test_search_pipeline
 
 # Open WebUI + pipelines -- profile-gated (profiles: [open-webui] in
 # docker-compose.yml) so plain `make up`/`docker compose up` never starts
